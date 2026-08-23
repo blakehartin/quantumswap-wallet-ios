@@ -407,12 +407,22 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         sendRow.axis = .horizontal
         sendRow.alignment = .center
 
+        // Desktop send header: title + gas chip (fee label + pump).
+        let gasChipView = GasChipView()
+        titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let titleRow = UIStackView(arrangedSubviews: [titleLabel, gasChipView])
+        titleRow.axis = .horizontal
+        titleRow.alignment = .center
+        titleRow.spacing = 8
+        gasChip = GasChipController(host: self, walletAddress: currentAddress(), chip: gasChipView, kind: .sendCoin)
+        amountField.addTarget(self, action: #selector(amountEdited), for: .editingChanged)
+
         // Outer vertical stack. `setCustomSpacing(after:)` reproduces
         // the per-row margins the Android `LinearLayout` uses inside
         // the card.
         let stack = UIStackView(arrangedSubviews: [
                 backBar,
-                titleLabel,
+                titleRow,
                 divider,
                 networkRow,
                 unrecognizedToggleRow,
@@ -430,7 +440,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         stack.alignment = .fill
         stack.spacing = 6
         stack.setCustomSpacing(4, after: backBar)
-        stack.setCustomSpacing(8, after: titleLabel)
+        stack.setCustomSpacing(8, after: titleRow)
         stack.setCustomSpacing(12, after: divider)
         stack.setCustomSpacing(12, after: networkRow)
         stack.setCustomSpacing(8, after: unrecognizedToggleRow)
@@ -444,6 +454,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         stack.setCustomSpacing(14, after: amountField)
         stack.translatesAutoresizingMaskIntoConstraints = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.showsVerticalScrollIndicator = false
         scroll.alwaysBounceVertical = true
         scroll.keyboardDismissMode = .interactive
         view.addSubview(scroll)
@@ -647,6 +658,10 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         }
         rebuildAssetMenu()
         refreshBalance()
+        // Asset switch = new transaction kind: drop any stale estimate
+        // / override and re-estimate for the new kind.
+        gasChip?.reset()
+        scheduleSendGasEstimate()
     }
 
     /// Friendly display name for the native coin -- mirrors the
@@ -812,6 +827,7 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         let typed = toField.text ?? ""
         toFieldPlaceholder.isHidden = !typed.isEmpty
         scheduleAddressValidation()
+        scheduleSendGasEstimate()
     }
 
     /// Cancels any in-flight validation, hides the explorer button
@@ -1264,101 +1280,82 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
     /// not displayed because the user cannot meaningfully
     /// act on the value. The constants are still a pinned
     /// cap on the gas the signed transaction will burn.
-    nonisolated private static let gasLimitNative = "21000"
-    nonisolated private static let gasLimitToken = "90000"
+    // MARK: - Gas chip (desktop scheduleSendGasEstimate)
 
-    private func presentReviewDialog(to: String, amount: String) {
-        let from = currentAddress()
-        let networkName = BlockchainNetworkManager.shared.active?.name ?? ""
-        // (notes):
-        // capture the active network snapshot AND the From-address
-        // at the moment the user taps Review. Both values are
-        // forwarded through the unlock + submit pipeline and
-        // re-asserted at submit time. If the user (or a programmatic
-        // background task) changes networks or switches the active
-        // wallet between Review and Submit, the bridge call is
-        // aborted with a `NetworkAssertionError` and the user sees
-        // an explicit "review and resubmit" message. This binds the
-        // signed-transaction's chain-id and from-address to the
-        // values the user CONFIRMED, not whatever happens to be
-        // active when scrypt finishes.
-        // Use the synchronous mirror `NetworkConfig.currentSync`
-        // here (added by the related race-condition fix) so the snapshot
-        // capture happens at the SAME runloop tick as the
-        // `BlockchainNetworkManager.shared.active?.name` read above.
-        // The previous shape captured via `await NetworkConfig.shared.current`
-        // INSIDE a detached Task, which created a torn-view window:
-        // a network switch on the main queue between this point
-        // and the actor's hop could leave `networkName` showing one
-        // value (read sync, pre-switch) and `captured` showing
-        // another (read async, post-switch). The signing path's
-        // submit-time re-assertion at line ~1281 below continues
-        // using `await NetworkConfig.shared.current` because that
-        // call is already inside an `await` context and benefits
-        // from the actor's serialisation guarantees.
-        let captured = NetworkConfig.currentSync
-        let capturedFrom = from
-        Task { [weak self] in
-// the TO checksum MUST come from the SDK or the
-            // dialog MUST NOT render. A silent fallback to the
-            // raw lowercased form would show the recipient as a
-            // visually-correct-looking address that the user cannot
-            // case-checksum-compare against the address they expect -
-            // the entire purpose of the review dialog is defeated.
-            // The FROM address is the user's own wallet (never
-            // attacker-influenced for the duration of this screen);
-            // a missing checksum on FROM is a UX regression rather
-            // than a signing-correctness one, so we keep the
-            // permissive fallback there.
-            let toChecksum: String
-            do {
-                let envTo = try await JsBridge.shared.getChecksumAddressAsync(to)
-                guard let canonical = SendViewController.parseChecksumAddress(envTo) else {
-                    await MainActor.run {
-                        Toast.showError(Localization.shared.getQuantumAddrByErrors())
-                    }
-                    return
-                }
-                toChecksum = canonical
-            } catch {
-                await MainActor.run {
-                    Toast.showError(Localization.shared.getQuantumAddrByErrors())
-                }
-                return
+    private var gasChip: GasChipController?
+
+    /// 2 s debounce after any edit of address / amount / asset. The
+    /// payload provider returns nil (label cleared, no request) until
+    /// the form is complete enough: a valid-looking address and a
+    /// positive amount. Buffer: 0% for sendCoin, 10% for sendToken.
+    private func scheduleSendGasEstimate() {
+        guard let gasChip else { return }
+        gasChip.kind = selectedTokenContract == nil ? .sendCoin : .sendToken
+        gasChip.schedule { [weak self] in
+            guard let self else { return nil }
+            let to = (self.toField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let amount = (self.amountField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard QuantumSwapAddress.isValid(to), Self.isValidAmount(amount) else { return nil }
+            var p: [String: Any] = ["toAddress": to, "amount": amount]
+            if let contract = self.selectedTokenContract {
+                p["contractAddress"] = contract
+                p["fromDecimals"] = self.tokens.first(where: { $0.contractAddress == contract })?.decimals
+                    ?? CoinUtils.ETHER_DECIMALS
             }
-            // FROM address - permissive fallback is intentional,
-            // see header comment above.
-            let fromChecksum: String
-            do {
-                let envFrom = try await JsBridge.shared.getChecksumAddressAsync(from)
-                fromChecksum = SendViewController.parseChecksumAddress(envFrom) ?? from
-            } catch {
-                fromChecksum = from
-            }
-            await MainActor.run {
-                guard let self = self else { return }
-                let dlg = TransactionReviewDialogViewController(
-                    asset: self.currentAssetReviewText(),
-                    assetContract: self.currentAssetContractAddress(),
-                    fromAddress: fromChecksum,
-                    toAddress: toChecksum,
-                    amount: amount,
-                    networkName: networkName,
-                    chainId: captured.chainId)
-                dlg.onConfirm = { [weak self] in
-                    self?.presentUnlockAndSend(
-                        to: to, amount: amount,
-                        capturedSnapshot: captured,
-                        capturedFromAddress: capturedFrom)
-                }
-                self.present(dlg, animated: true)
-            }
+            return p
         }
     }
 
-    /// Parse `bridge.getChecksumAddress`'s
-    /// `{"data":{"address":"..."}}` envelope. Returns the
-    /// checksummed address on success; nil if the schema drifts.
+    @objc private func amountEdited() {
+        scheduleSendGasEstimate()
+    }
+
+    // MARK: - Review (desktop one-dialog review: fields + gas + "i agree")
+
+    private func presentReviewDialog(to: String, amount: String) {
+        let from = currentAddress()
+        let captured = NetworkConfig.currentSync
+        let capturedFrom = from
+        guard let gasChip else { return }
+        gasChip.kind = selectedTokenContract == nil ? .sendCoin : .sendToken
+        gasChip.ensureReady { [weak self] in
+            guard let self else { return }
+            let L = Localization.shared
+            let gas = gasChip.resolve()
+            guard gas.gasLimit > 0 else {
+                self.present(MessageInformationDialogViewController.error(
+                    title: L.getErrorTitleByLangValues(),
+                    message: L.lang("tx-step-invalid-gas", fallback: "Enter a valid positive gas limit.")),
+                    animated: true)
+                return
+            }
+            let isCoin = self.selectedTokenContract == nil
+            let token = self.selectedTokenContract.flatMap { c in
+                self.tokens.first(where: { $0.contractAddress == c })
+            }
+            let sym = DexBridgeResult.sanitizeSymbol(token?.symbol)
+            let name = DexBridgeResult.sanitizeSymbol(token?.name)
+            let spec = ReviewSpec()
+                .action(isCoin ? L.getSendByLangValues() + " Q"
+                               : L.getSendByLangValues() + " " + name + " (" + sym + ")")
+                .contractAddress(isCoin ? nil : self.selectedTokenContract)
+                .contractIsToken(!isCoin)
+                .fromAddress(from)
+                .toAddress(to)
+                .quantityValue(isCoin ? amount : "0")
+                .tokenQuantityValue(isCoin ? nil : amount + " " + sym)
+                .gas(gas.gasLimit, GasFee.formatQ(gas.feeNumber))
+                .networkText(ReviewSpec.networkText())
+            let dlg = TransactionReviewDialogViewController(spec: spec, walletAddress: from)
+            dlg.onCredentials = { [weak self] credentials in
+                self?.sendTransaction(credentials: credentials, gasLimit: gas.gasLimit,
+                                      to: to, amount: amount,
+                                      capturedSnapshot: captured, capturedFromAddress: capturedFrom)
+            }
+            self.present(dlg, animated: true)
+        }
+    }
+
     private static func parseChecksumAddress(_ envelope: String) -> String? {
         guard let data = envelope.data(using: .utf8),
         let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1369,342 +1366,119 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         return addr
     }
 
-    /// Single-pipeline unlock + submit flow. Mirrors the Android
-    /// `WaitDialog` UX where the same dialog stays on screen across
-    /// both phases, only its label text swaps:
-    /// 1. Present the unlock dialog. On empty password show the
-    /// inline orange error and bail without dismissing.
-    /// 2. Present a single `WaitDialog("Decrypting wallet...")` on
-    /// top of the unlock dialog. Decrypt runs on a detached task.
-    /// 3. On wrong password / decode failure: dismiss only the wait
-    /// dialog (animated) and show the wrong-password orange
-    /// error layered on the unlock dialog. The user keeps the
-    /// password field state for typo-fix retry.
-    /// 4. On successful decrypt: update `wait.message` in place to
-    /// "Please wait while your transaction is being submitted",
-    /// keep both unlock + wait presented, and run the chain
-    /// submission on the same detached task. This avoids the
-    /// dismiss/re-present flicker the previous two-dialog
-    /// implementation introduced between phases.
-    /// 5. On submit success / failure: cascade-dismiss wait, then
-    /// unlock, then present the sent / error dialog.
-    private func presentUnlockAndSend(to: String,
-        amount: String,
-        capturedSnapshot: NetworkSnapshot,
-        capturedFromAddress: String) {
+    /// Sign + broadcast with the credentials the review/unlock handoff
+    /// just verified and the gas limit the user agreed to. The network
+    /// + wallet snapshot captured at agree-time is re-asserted before
+    /// signing so a switch between Review and Sign aborts the broadcast
+    /// instead of producing a wrong-chain signature.
+    private func sendTransaction(credentials: Credentials, gasLimit: Int64,
+                                 to: String, amount: String,
+                                 capturedSnapshot: NetworkSnapshot,
+                                 capturedFromAddress: String) {
         let L = Localization.shared
-        let dlg = UnlockDialogViewController()
-        dlg.onUnlock = { [weak self, weak dlg] pw in
-            guard let self = self, let dlg = dlg else { return }
-            if pw.isEmpty {
-                self.showEmptyPasswordError(over: dlg)
-                return
-            }
-            let wait = WaitDialogViewController(
-                message: L.getDecryptingWalletByLangValues())
-            dlg.present(wait, animated: true)
-            let walletIndex = PrefConnect.shared.readInt(
-                PrefKeys.WALLET_CURRENT_ADDRESS_INDEX_KEY, default: 0)
-            // Resolve token decimals + scale the user-typed amount
-            // into wei BEFORE entering the detached task so the
-            // background worker never reads `self.tokens` (which is
-            // owned by the main actor). Mirrors Android
-            // `SendFragment.sendTransaction` where
-            // `CoinUtils.parseEther / parseUnits` runs on the UI
-            // thread before the signer call.
-            let weiAmount: String
-            if let contract = self.selectedTokenContract,
-            let token = self.tokens.first(
-                where: { $0.contractAddress == contract }) {
-                weiAmount = CoinUtils.parseUnits(
-                    amount, decimals: token.decimals ?? CoinUtils.ETHER_DECIMALS)
-            } else {
-                weiAmount = CoinUtils.parseEther(amount)
-            }
-            // Capture `wait`, `dlg`, and `self` weakly so the
-            // detached worker never deallocates a UIViewController
-            // (and its CALayers) on a background thread when the
-            // task closure releases. See the prior layout-engine
-            // crash fix.
-            Task.detached(priority: .userInitiated) {
-                [weak self, weak dlg, weak wait, selectedTokenContract, weiAmount] in
-                // Phase 1 - decrypt
-// the decrypted private/public key
-                // bytes flow through the binary channel; we
-                // hold them as `Data` so the `defer { resetBytes }`
-                // pattern actually wipes the bytes after signing.
-                var decryptedKeys: JsBridge.WalletEnvelope?
-                defer {
-                    if var d = decryptedKeys {
-                        d.privateKey.resetBytes(in: 0..<d.privateKey.count)
-                        d.publicKey.resetBytes(in: 0..<d.publicKey.count)
-                        decryptedKeys = d
-                    }
+        let wait = WaitDialogViewController(message: L.getSigningTransactionByLangValues())
+        present(wait, animated: true)
+        let walletIndex = PrefConnect.shared.readInt(PrefKeys.WALLET_CURRENT_ADDRESS_INDEX_KEY, default: 0)
+        let weiAmount: String
+        if let contract = selectedTokenContract,
+           let token = tokens.first(where: { $0.contractAddress == contract }) {
+            weiAmount = CoinUtils.parseUnits(amount, decimals: token.decimals ?? CoinUtils.ETHER_DECIMALS)
+        } else {
+            weiAmount = CoinUtils.parseEther(amount)
+        }
+        let gasLimitText = String(gasLimit)
+        var creds = credentials
+        Task.detached(priority: .userInitiated) { [weak self, weak wait, selectedTokenContract, weiAmount] in
+            defer { creds.wipe() }
+            do {
+                let nowSnapshot = await NetworkConfig.shared.current
+                guard nowSnapshot == capturedSnapshot else {
+                    throw NetworkAssertionError.networkSwitchedMidFlight(
+                        captured: capturedSnapshot, current: nowSnapshot)
                 }
+                let nowFrom = Strongbox.shared.address(forIndex: walletIndex) ?? ""
+                guard nowFrom.lowercased() == capturedFromAddress.lowercased() else {
+                    throw NetworkAssertionError.walletSwitchedMidFlight(
+                        capturedAddress: capturedFromAddress, currentAddress: nowFrom)
+                }
+                let chainId = capturedSnapshot.chainId
+                let rpc = capturedSnapshot.rpcEndpoint
+
+                let nonce: Int
                 do {
-                    // The per-wallet keys live in cleartext inside
-                    // the unlocked strongbox snapshot (the strongbox
-                    // AEAD is the only encryption layer over them).
-                    // We still re-prompt for the password and run
-                    // it through `UnlockCoordinatorV2.verifyPassword`
-                    // BEFORE pulling the keys, for two reasons:
-                    //   (1) Re-authentication: a momentarily-
-                    //       unattended unlocked phone cannot send
-                    //       funds without the password, matching
-                    //       the historical Send-screen UX.
-                    //   (2) Brute-force gating: `verifyPassword`
-                    //       runs a full scrypt + AEAD-open of the
-                    //       passwordWrap envelope and routes
-                    //       failures through `UnlockAttemptLimiter
-                    //       .strongboxUnlock`, identical to the
-                    //       primary unlock dialog. Without it, the
-                    //       Send screen would be an unrate-limited
-                    //       brute-force surface against the user
-                    //       password.
-                    try UnlockCoordinatorV2.verifyPassword(pw)
-                    // the snapshot must still hold the wallet at
-                    // `walletIndex` after `verifyPassword`
-                    // returns. If a stale or mismatched address
-                    // somehow ends up at `Strongbox.address(forIndex:)`
-                    // (corrupted slot, race against an in-flight
-                    // wallet-switch, malicious slot-file
-                    // tampering), the read-back private key would
-                    // sign FROM a different address than the one
-                    // shown in the review dialog — silently
-                    // broadcasting the user's funds out of the
-                    // wrong wallet.
-                    let snapshotAddress = Strongbox.shared.address(forIndex: walletIndex) ?? ""
-                    if !snapshotAddress.isEmpty,
-                    snapshotAddress.lowercased() != capturedFromAddress.lowercased() {
-                        throw NetworkAssertionError.walletSwitchedMidFlight(
-                            capturedAddress: capturedFromAddress,
-                            currentAddress: snapshotAddress)
-                    }
-                    guard
-                        let priv = Strongbox.shared.privateKey(at: walletIndex),
-                        let pub = Strongbox.shared.publicKey(at: walletIndex)
-                    else {
-                        throw UnlockCoordinatorV2Error.notUnlocked
-                    }
-                    decryptedKeys = JsBridge.WalletEnvelope(
-                        address: snapshotAddress,
-                        seed: nil,
-                        seedWords: nil,
-                        privateKey: priv,
-                        publicKey: pub)
+                    nonce = try JsBridge.shared.fetchNonce(
+                        address: capturedFromAddress, rpcEndpoint: rpc, chainId: chainId)
                 } catch {
-                    // Forward the typed error so the
-                    // UI can render the lockout-specific copy when the
-                    // limiter rejected the unlock.
-                    let capturedErr = error
+                    let detail = Self.userFacingError(error)
                     await MainActor.run {
                         wait?.dismiss(animated: true) {
-                            if let dlg = dlg {
-                                self?.showWrongPasswordError(
-                                    over: dlg, error: capturedErr)
-                            }
+                            self?.presentPhaseError(phase: .nonce, detail: detail)
                         }
                     }
                     return
                 }
 
-                // Bridge from decrypt to signing by updating the
-                // existing wait dialog's message in place. The
-                // `message` property's didSet rebinds `label.text`,
-                // so the visible card just swaps copy without any
-                // dismiss / present animation in between. The send is
-                // now a two-step flow (sign locally, then broadcast),
-                // so this card walks through "signing" then
-                // "submitting" copy as each phase begins.
-                await MainActor.run {
-                    wait?.message = L.getSigningTransactionByLangValues()
-                }
-
-                // Phase 2 - submit
+                let signedTx: String
                 do {
-                    // Re-assert the captured network snapshot AND
-                    // the captured From-address against current
-                    // state BEFORE the bridge signs the transaction.
-                    // If either changed, abort with an explicit
-                    // `NetworkAssertionError` so:
-                    // - The signed transaction is bound to the
-                    // chain the user CONFIRMED, not whatever
-                    // happens to be active when scrypt finished.
-                    // - The transaction is signed by the wallet
-                    // the user CONFIRMED, not whatever happens
-                    // to be the "current" wallet now (e.g. user
-                    // backgrounded, switched wallets, then
-                    // foregrounded). This catches the wallet-
-                    // switch-mid-flight class.
-                    // The captured snapshot's chainId / rpcEndpoint
-                    // are then used for the bridge call (NOT
-                    // Constants.* which could have been mutated by
-                    // a parallel applyActive task).
-                    let nowSnapshot = await NetworkConfig.shared.current
-                    guard nowSnapshot == capturedSnapshot else {
-                        throw NetworkAssertionError.networkSwitchedMidFlight(
-                            captured: capturedSnapshot, current: nowSnapshot)
-                    }
-                    let nowFrom = Strongbox.shared.address(forIndex: walletIndex) ?? ""
-                    guard nowFrom.lowercased() == capturedFromAddress.lowercased() else {
-                        throw NetworkAssertionError.walletSwitchedMidFlight(
-                            capturedAddress: capturedFromAddress,
-                            currentAddress: nowFrom)
-                    }
-                    let advancedSigning = PrefConnect.shared.readBool(
-                        PrefKeys.ADVANCED_SIGNING_ENABLED_KEY)
-                    let chainId = capturedSnapshot.chainId
-                    let rpc = capturedSnapshot.rpcEndpoint
-                    guard let keys = decryptedKeys else {
-                        throw UnlockCoordinatorV2Error.decodeFailed
-                    }
-
-                    // STEP 1 - fetch the nonce NATIVELY (URLSession).
-                    // The in-WebView RPC `fetch` stalls on device while
-                    // native HTTP to the same endpoint works, so account
-                    // details are fetched here and the nonce is handed
-                    // to the (now fully-local) WebView signer. A failure
-                    // here is unambiguously the nonce-fetch phase.
-                    let nonce: Int
-                    do {
-                        nonce = try JsBridge.shared.fetchNonce(
-                            address: capturedFromAddress,
-                            rpcEndpoint: rpc, chainId: chainId)
-                    } catch {
-                        let detail = Self.userFacingError(error)
-                        await MainActor.run {
-                            wait?.dismiss(animated: true) {
-                                dlg?.dismiss(animated: true) {
-                                    self?.presentPhaseError(phase: .nonce, detail: detail)
-                                }
-                            }
-                        }
-                        return
-                    }
-
-                    // STEP 2 - sign locally (handles the private key).
-                    // Signing is fully local now (nonce supplied), so a
-                    // failure here is the signing phase; `bridge.html`
-                    // still tags signing errors `PHASE_SIGN:`.
-                    let signedTx: String
-                    do {
-                        if let contract = selectedTokenContract {
-                            signedTx = try JsBridge.shared.signTokenTransaction(
-                                privKey: keys.privateKey, pubKey: keys.publicKey,
-                                contractAddress: contract, toAddress: to,
-                                amountWei: weiAmount, gasLimit: Self.gasLimitToken,
-                                rpcEndpoint: rpc, chainId: chainId,
-                                advancedSigningEnabled: advancedSigning, nonce: nonce)
-                        } else {
-                            signedTx = try JsBridge.shared.signCoinTransaction(
-                                privKey: keys.privateKey, pubKey: keys.publicKey,
-                                toAddress: to, valueWei: weiAmount, gasLimit: Self.gasLimitNative,
-                                rpcEndpoint: rpc, chainId: chainId,
-                                advancedSigningEnabled: advancedSigning, nonce: nonce)
-                        }
-                    } catch {
-                        let phase = Self.signPhase(from: error)
-                        let detail = Self.userFacingError(error)
-                        await MainActor.run {
-                            wait?.dismiss(animated: true) {
-                                dlg?.dismiss(animated: true) {
-                                    self?.presentPhaseError(phase: phase, detail: detail)
-                                }
-                            }
-                        }
-                        return
-                    }
-
-                    // Signing succeeded; the signed transaction is a
-                    // non-secret public artifact. Swap the wait copy
-                    // to the broadcast phase before the network call.
-                    await MainActor.run {
-                        wait?.message = L.getSubmittingTransactionByLangValues()
-                    }
-
-                    // STEP 3 - broadcast NATIVELY (no key material
-                    // involved). Any failure here is unambiguously the
-                    // submission phase.
-                    let result: String
-                    do {
-                        result = try JsBridge.shared.broadcastTransaction(
-                            signedTx: signedTx, rpcEndpoint: rpc, chainId: chainId)
-                    } catch {
-                        let detail = Self.userFacingError(error)
-                        await MainActor.run {
-                            wait?.dismiss(animated: true) {
-                                dlg?.dismiss(animated: true) {
-                                    self?.presentPhaseError(
-                                        phase: .submitting, detail: detail)
-                                }
-                            }
-                        }
-                        return
-                    }
-                    let txHash = Self.parseTxHash(result)
-                    await MainActor.run {
-                        wait?.dismiss(animated: true) {
-                            dlg?.dismiss(animated: true) {
-                                self?.presentSentDialog(txHash: txHash)
-                            }
-                        }
+                    if let contract = selectedTokenContract {
+                        signedTx = try JsBridge.shared.signTokenTransaction(
+                            privKey: creds.privateKey, pubKey: creds.publicKey,
+                            contractAddress: contract, toAddress: to,
+                            amountWei: weiAmount, gasLimit: gasLimitText,
+                            rpcEndpoint: rpc, chainId: chainId,
+                            advancedSigningEnabled: creds.advancedSigning, nonce: nonce)
+                    } else {
+                        signedTx = try JsBridge.shared.signCoinTransaction(
+                            privKey: creds.privateKey, pubKey: creds.publicKey,
+                            toAddress: to, valueWei: weiAmount, gasLimit: gasLimitText,
+                            rpcEndpoint: rpc, chainId: chainId,
+                            advancedSigningEnabled: creds.advancedSigning, nonce: nonce)
                     }
                 } catch {
-                    let msg = Self.userFacingError(error)
+                    let phase = Self.signPhase(from: error)
+                    let detail = Self.userFacingError(error)
                     await MainActor.run {
                         wait?.dismiss(animated: true) {
-                            dlg?.dismiss(animated: true) {
-                                self?.presentErrorDialog(message: msg)
-                            }
+                            self?.presentPhaseError(phase: phase, detail: detail)
                         }
+                    }
+                    return
+                }
+
+                await MainActor.run {
+                    wait?.message = L.getSubmittingTransactionByLangValues()
+                }
+
+                let result: String
+                do {
+                    result = try JsBridge.shared.broadcastTransaction(
+                        signedTx: signedTx, rpcEndpoint: rpc, chainId: chainId)
+                } catch {
+                    let detail = Self.userFacingError(error)
+                    await MainActor.run {
+                        wait?.dismiss(animated: true) {
+                            self?.presentPhaseError(phase: .submitting, detail: detail)
+                        }
+                    }
+                    return
+                }
+                let txHash = Self.parseTxHash(result)
+                await MainActor.run {
+                    wait?.dismiss(animated: true) {
+                        self?.presentSentDialog(txHash: txHash, fromAddress: capturedFromAddress)
+                    }
+                }
+            } catch {
+                let msg = Self.userFacingError(error)
+                await MainActor.run {
+                    wait?.dismiss(animated: true) {
+                        self?.presentErrorDialog(message: msg)
                     }
                 }
             }
         }
-        present(dlg, animated: true)
     }
 
-    /// Empty-password error surfaced as an orange "exclamation
-    /// triangle + OK" modal layered on top of the unlock dialog.
-    /// The unlock dialog stays alive underneath, so the typed
-    /// address / amount / "i agree" all survive. The password field
-    /// is refocused once the alert is dismissed via the alert's
-    /// `onClose` callback (handled inside `showOrangeError`).
-    private func showEmptyPasswordError(over dlg: UnlockDialogViewController) {
-        dlg.showOrangeError(Localization.shared.getEmptyPasswordByErrors())
-    }
-
-    /// Wrong-password error layered as an orange OK alert on top of
-    /// the unlock dialog. Field contents are intentionally preserved
-    /// so the user can fix a typo without retyping the whole
-    /// password.
-    /// When `error` is
-    /// `UnlockCoordinatorV2Error.tooManyAttempts` the user sees
-    /// the "wait N seconds" message rather than the generic
-    /// wrong-password copy - so they understand the gate is
-    /// throttling them by design.
-    private func showWrongPasswordError(over dlg: UnlockDialogViewController,
-        error: Error? = nil) {
-        if let uc = error as? UnlockCoordinatorV2Error,
-        case let .tooManyAttempts(seconds) = uc {
-            dlg.showOrangeError(
-                UnlockAttemptLimiter.userFacingLockoutMessage(
-                    remainingSeconds: seconds))
-        } else {
-            dlg.showOrangeError(Localization.shared.getWalletPasswordMismatchByErrors())
-        }
-    }
-
-    /// Map `UnlockCoordinatorV2Error` (and other low-level errors)
-    /// to a user-visible string. Mirrors
-    /// `HomeWalletViewController.userFacingError` so a key-related
-    /// failure mid-transaction surfaces the localized "wrong
-    /// password" copy instead of the bare `authenticationFailed`
-    /// enum-case description.
-    /// A `tooManyAttempts` failure surfaces the
-    /// per-lockout "wait N seconds" message - the user must
-    /// understand the rate limiter is enforcing throttling so they
-    /// do not blame their own typing.
     nonisolated private static func userFacingError(_ error: Error) -> String {
         if let uc = error as? UnlockCoordinatorV2Error {
             switch uc {
@@ -1729,8 +1503,8 @@ public final class SendViewController: UIViewController, HomeScreenViewTypeProvi
         return "\(error)"
     }
 
-    private func presentSentDialog(txHash: String) {
-        let dlg = TransactionSentDialogViewController(txHash: txHash)
+    private func presentSentDialog(txHash: String, fromAddress: String) {
+        let dlg = TransactionSentDialogViewController(txHash: txHash, fromAddress: fromAddress)
         dlg.onClose = { [weak self] in
             (self?.parent as? HomeViewController)?
                 .showMain(refreshBalanceAfterNavigation: true)

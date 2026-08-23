@@ -21,6 +21,10 @@ public final class AdvancedViewController: UIViewController, HomeScreenViewTypeP
 
         let titleRule = DexScreenChrome.makeDivider()
 
+        // Desktop order: Tokens, Liquidity, Pools.
+        let tokens = DexScreenChrome.makeListRow(
+            title: L.lang("adv-tokens", fallback: "Tokens"),
+            target: self, action: #selector(openTokens))
         let liquidity = DexScreenChrome.makeListRow(
             title: L.lang("adv-liquidity", fallback: "Liquidity"),
             target: self, action: #selector(openLiquidity))
@@ -30,7 +34,7 @@ public final class AdvancedViewController: UIViewController, HomeScreenViewTypeP
             showBottomDivider: false)
 
         let stack = UIStackView(arrangedSubviews: [
-            backBar, title, titleRule, liquidity, pools
+            backBar, title, titleRule, tokens, liquidity, pools
         ])
         stack.axis = .vertical
         stack.spacing = 0
@@ -47,8 +51,13 @@ public final class AdvancedViewController: UIViewController, HomeScreenViewTypeP
         view.installPressFeedbackRecursive()
     }
 
+    /// Advanced is a top-level drawer entry: back returns Home.
     @objc private func tapBack() {
-        (parent as? HomeViewController)?.beginTransactionNow(SettingsViewController())
+        (parent as? HomeViewController)?.showMain()
+    }
+
+    @objc private func openTokens() {
+        (parent as? HomeViewController)?.beginTransactionNow(TokenCreateViewController())
     }
 
     @objc private func openLiquidity() {
@@ -117,6 +126,30 @@ enum DexScreenChrome {
         return row
     }
 
+    /// Bold 14pt colorCommon1 field heading (Android textView_*_label).
+    static func makeHeading(_ text: String) -> UILabel {
+        let l = UILabel()
+        l.text = text
+        l.font = Typography.boldTitle(14)
+        l.textColor = UIColor(named: "colorCommon1") ?? .label
+        return l
+    }
+
+    /// Teal text link (Android textView_*_link / drawer_item_bg): 15pt
+    /// quantumTeal, underlined when `underline`, padded tap target.
+    static func makeLink(_ text: String, size: CGFloat = 15, underline: Bool = false,
+                         target: Any?, action: Selector) -> UIButton {
+        let b = UIButton(type: .system)
+        let attrs: [NSAttributedString.Key: Any] = underline
+            ? [.font: Typography.body(size), .foregroundColor: UIColor.quantumTeal,
+               .underlineStyle: NSUnderlineStyle.single.rawValue]
+            : [.font: Typography.body(size), .foregroundColor: UIColor.quantumTeal]
+        b.setAttributedTitle(NSAttributedString(string: text, attributes: attrs), for: .normal)
+        b.contentEdgeInsets = UIEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        b.addTarget(target, action: action, for: .touchUpInside)
+        return b
+    }
+
     static func makeLabel(_ text: String) -> UILabel {
         let l = UILabel()
         l.text = text
@@ -151,6 +184,42 @@ enum DexScreenChrome {
             title: L.getErrorTitleByLangValues(),
             message: L.getErrorOccurredByLangValues() + DexBridgeResult.sanitizeError(message))
         host.present(dlg, animated: true)
+    }
+
+    /// Every account token that survives the stablecoin-impersonator
+    /// filter (recognized AND unrecognized); the token picker partitions
+    /// them itself.
+    static func loadAccountTokens(for address: String) async -> [AccountTokenSummary] {
+        do {
+            let resp = try await AccountsApi.accountTokens(address: address, pageIndex: 1)
+            return StablecoinImpersonatorFilter.filter(resp.result ?? [])
+        } catch {
+            return []
+        }
+    }
+
+    /// Resolve a custom / placeholder picker row's decimals + symbol
+    /// through swapGetTokenMetadata (no-op when already known).
+    static func resolveMeta(_ picker: DexTokenPickerView, walletAddress: String) async throws {
+        guard picker.needsMetadata() else { return }
+        let addr = picker.tokenValue()
+        var payload = DexPayloads.base()
+        payload["contractAddress"] = addr
+        payload["ownerAddress"] = walletAddress
+        let json = try await JsBridge.shared.dexCallAsync(method: "swapGetTokenMetadata", payload: payload)
+        let data = try DexBridgeResult.unwrapData(json)
+        let symbol = (data["symbol"] as? String) ?? ""
+        let decimals = (data["decimals"] as? Int) ?? (data["decimals"] as? NSNumber)?.intValue ?? 18
+        let contract = (data["contractAddress"] as? String) ?? addr
+        await MainActor.run {
+            picker.setResolvedMeta(address: contract, symbol: symbol, decimals: decimals)
+        }
+    }
+
+    /// "Q" -> the active release's wrapped-Q contract (what the bridge
+    /// maps it to); otherwise the address as-is.
+    static func resolveTokenContract(_ tokenValue: String, release: ReleaseStore.Release) -> String {
+        tokenValue == "Q" ? release.wq : tokenValue
     }
 
     static func loadRecognizedTokens(for address: String) async -> [AccountTokenSummary] {

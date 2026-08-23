@@ -116,13 +116,19 @@ public final class ReleasesViewController: UIViewController, HomeScreenViewTypeP
             name.font = Typography.body(15)
             name.textColor = UIColor(named: "colorCommon6") ?? .label
 
-            let detail = UILabel()
-            detail.text = "WQ \(DexBridgeResult.shortAddr(release.wq))\n"
-                + "Factory \(DexBridgeResult.shortAddr(release.factory))\n"
-                + "Router \(DexBridgeResult.shortAddr(release.router))"
-            detail.font = Typography.body(11)
-            detail.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
-            detail.numberOfLines = 0
+            // Full addresses, monospace, selectable (Android safeAddr()).
+            let detail = UITextView()
+            detail.text = "WQ \(release.wq)\n"
+                + "Factory \(release.factory)\n"
+                + "Router \(release.router)"
+            detail.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+            detail.textColor = UIColor(named: "colorCommon3") ?? .secondaryLabel
+            detail.isEditable = false
+            detail.isScrollEnabled = false
+            detail.backgroundColor = .clear
+            detail.textContainerInset = .zero
+            detail.textContainer.lineFragmentPadding = 0
+            detail.textContainer.lineBreakMode = .byCharWrapping
 
             let textStack = UIStackView(arrangedSubviews: [name, detail])
             textStack.axis = .vertical

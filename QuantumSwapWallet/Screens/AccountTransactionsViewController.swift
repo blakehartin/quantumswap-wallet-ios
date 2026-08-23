@@ -28,10 +28,14 @@ HomeScreenViewTypeProviding {
     // Order: In/Out, Coins, Date, From, To, Txn Hash.
     private static let columnWidths: [CGFloat] = [70, 110, 220, 90, 90, 100]
 
-    private let segmented = UISegmentedControl(items: [
+    private let segmented: SegmentUnderlineControl = {
+        let c = SegmentUnderlineControl(items: [
             Localization.shared.getCompletedTransactionsByLangValues(),
             Localization.shared.getPendingTransactionsByLangValues()
         ])
+        c.textColor = .white
+        return c
+    }()
 
     /// Card holding the table; rounded corners + 1pt border.
     private let card = UIView()

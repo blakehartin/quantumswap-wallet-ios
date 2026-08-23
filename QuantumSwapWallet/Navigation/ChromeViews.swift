@@ -1,12 +1,15 @@
 // ChromeViews.swift
-// Top banner + center strip + bottom nav + offline overlay chrome
-// views used by `HomeViewController`. Port the exact visual layout of
-// `home_activity.xml` and the banner background from
-// `drawable-v24/gradient_layer.xml`.
-// Android reference:
-// app/src/main/res/layout/home_activity.xml
-// app/src/main/res/drawable-v24/gradient_layer.xml
-// app/src/main/res/layout/retry_layout.xml
+// Home chrome ported from the desktop app / Android `home_activity.xml`:
+//   - TopBannerView: header band (#EB020205 + 1pt #14FFFFFF hairline)
+//     holding the burger button, the brand row (logo mark + gradient
+//     wordmark) and the network chip. Band height = content + a
+//     per-screen bottom padding (68pt home so the wallet card overlaps
+//     it by 56pt, 12pt elsewhere).
+//   - CenterStripView: the wallet card (center_container gradient, 22pt
+//     radius) with address, copy / explorer / refresh, balance and the
+//     four glass action tiles (Send / Receive / Transactions / Swap).
+//   - OfflineOverlayView: unchanged.
+// The bottom navigation was replaced by the burger drawer (DrawerView).
 
 import UIKit
 
@@ -14,162 +17,137 @@ import UIKit
 
 public final class TopBannerView: UIView {
 
-    private let gradient = CAGradientLayer()
-    private let logoView = UIImageView()
-    private let titleLabel = UILabel()
+    public var onBurgerTap: (() -> Void)?
 
-    /// Right-aligned slot at the top of the banner that the controller
-    /// can drop the network-chip button into. Matches Android's
-    /// `imageButton_home_network` (top-right corner of `home_activity.xml`).
+    private let burgerButton = UIButton(type: .custom)
+    private let brandRow = UIStackView()
+    private let logoView = LogoMarkView()
+    private let titleLabel = GradientWordmarkLabel()
+    private let hairline = UIView()
+
     public let networkChipContainer = UIView()
 
-    /// Live height constraint - `HomeViewController` updates this every
-    /// layout pass to mirror Android's `screenWidthDp * 30 / 100` math.
-    private var heightConstraint: NSLayoutConstraint?
+    private var bottomPadding: NSLayoutConstraint?
+    private var brandLeading: NSLayoutConstraint?
+    private var brandCenter: NSLayoutConstraint?
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
-        installGradient()
+        backgroundColor = UIColor(argbHex: 0xEB020205)
         installContent()
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    public override func layoutSubviews() {
-        super.layoutSubviews()
-        // CALayer is not driven by Auto Layout - resize on every pass.
-        // Disable implicit animations to avoid a jumpy reveal during the
-        // first onboarding layout where the banner height jumps from its
-        // seed value to ~30% of view width.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        gradient.frame = bounds
-        CATransaction.commit()
-    }
-
-    // MARK: - Setup
-
-    /// Quantum Violet banner gradient: violet → soft violet → cyan,
-    /// matching Android `colorPrimaryDarkStart/Center/End` and the
-    /// desktop hero accent stops.
-    private func installGradient() {
-        gradient.startPoint = CGPoint(x: 0, y: 0.5)
-        gradient.endPoint = CGPoint(x: 1, y: 0.5)
-        gradient.colors = [
-            UIColor(named: "colorPrimaryDarkStart")?.cgColor
-                ?? UIColor(red: 0.424, green: 0.231, blue: 1.0, alpha: 1).cgColor,
-            UIColor(named: "colorPrimaryDarkCenter")?.cgColor
-                ?? UIColor(red: 0.494, green: 0.341, blue: 0.949, alpha: 1).cgColor,
-            UIColor(named: "colorPrimaryDarkEnd")?.cgColor
-                ?? UIColor(red: 0.0, green: 0.722, blue: 0.800, alpha: 1).cgColor
-        ]
-        gradient.locations = [0.000, 0.500, 1.000]
-        layer.insertSublayer(gradient, at: 0)
-    }
-
-    /// Banner content: full-width logo at top, centered "QuantumSwap"
-    /// title in 16pt bold black below it. Mirrors `home_activity.xml`
-    /// `imageView_home_logo` + `textView_home_tile`.
     private func installContent() {
-        logoView.image = UIImage(named: "Logo") ?? UIImage(systemName: "bitcoinsign.circle")
-        logoView.contentMode = .scaleAspectFit
+        // Burger (Android imageButton_home_burger / burger_button_bg).
+        burgerButton.setImage(BurgerIcon.image(), for: .normal)
+        burgerButton.backgroundColor = UIColor(argbHex: 0x0AFFFFFF)
+        burgerButton.layer.cornerRadius = 9
+        burgerButton.layer.borderWidth = 1
+        burgerButton.layer.borderColor = UIColor(argbHex: 0x21FFFFFF).cgColor
+        burgerButton.contentEdgeInsets = UIEdgeInsets(top: 7, left: 7, bottom: 7, right: 7)
+        burgerButton.accessibilityLabel = Localization.shared.getWalletsByLangValues()
+        burgerButton.addAction(UIAction { [weak self] _ in self?.onBurgerTap?() }, for: .touchUpInside)
+        burgerButton.addAction(UIAction { [weak self] _ in
+            self?.burgerButton.backgroundColor = UIColor(argbHex: 0x14FFFFFF) }, for: .touchDown)
+        burgerButton.addAction(UIAction { [weak self] _ in
+            self?.burgerButton.backgroundColor = UIColor(argbHex: 0x0AFFFFFF) },
+            for: [.touchUpInside, .touchUpOutside, .touchCancel])
 
+        // Brand row: 34pt mark + 10pt gap + 21pt bold gradient wordmark.
         titleLabel.text = Localization.shared.getTitleByLangValues()
-        titleLabel.font = Typography.boldTitle(16)
-        titleLabel.textColor = UIColor(named: "colorCommon6") ?? .black
-        titleLabel.textAlignment = .center
+        titleLabel.font = Typography.boldTitle(21)
+        titleLabel.textColor = .white
+        brandRow.axis = .horizontal
+        brandRow.alignment = .center
+        brandRow.spacing = 10
+        brandRow.addArrangedSubview(logoView)
+        brandRow.addArrangedSubview(titleLabel)
 
-        [logoView, titleLabel, networkChipContainer].forEach {
+        hairline.backgroundColor = UIColor(argbHex: 0x14FFFFFF)
+
+        [burgerButton, brandRow, networkChipContainer, hairline].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             addSubview($0)
         }
 
-        // Externally-controlled height; the 100pt seed is immediately
-        // overwritten by HomeViewController.viewDidLayoutSubviews.
-        let h = heightAnchor.constraint(equalToConstant: 100)
-        h.priority = .required
-        h.isActive = true
-        self.heightConstraint = h
-
-        // The title's bottom is no longer free-floating: pin it 10pt above
-        // the banner's bottom so the new 96pt banner gives the title some
-        // breathing room rather than leaving an awkward gap.
-        let titleBottom = titleLabel.bottomAnchor.constraint(
-            lessThanOrEqualTo: bottomAnchor, constant: -10)
-        titleBottom.priority = .defaultHigh
+        let pad = brandRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -68)
+        bottomPadding = pad
+        let center = brandRow.centerXAnchor.constraint(equalTo: centerXAnchor)
+        center.priority = .defaultHigh
+        brandCenter = center
+        let lead = brandRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 56)
+        lead.priority = .defaultHigh
+        lead.isActive = false
+        brandLeading = lead
 
         NSLayoutConstraint.activate([
-                // Pin to the banner's *safe-area* top, not its raw top
-                // edge: the parent view controller now anchors `TopBannerView`
-                // to `view.topAnchor` so the gradient bleeds under the
-                // notch / status bar, but the logo + title + network chip
-                // must still live below the system UI to avoid being clipped.
-                // `safeAreaLayoutGuide` correctly gives us the inset on
-                // notched / Dynamic-Island devices and collapses to the raw
-                // top anchor on landscape / iPad split where there is no
-                // status bar.
-                logoView.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 8),
-                logoView.leadingAnchor.constraint(equalTo: leadingAnchor),
-                logoView.trailingAnchor.constraint(equalTo: trailingAnchor),
-                logoView.heightAnchor.constraint(equalToConstant: 50),
+            burgerButton.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 8),
+            burgerButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            burgerButton.widthAnchor.constraint(equalToConstant: 36),
+            burgerButton.heightAnchor.constraint(equalToConstant: 36),
 
-                titleLabel.topAnchor.constraint(equalTo: logoView.bottomAnchor, constant: 2),
-                titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-                titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-                titleBottom,
+            logoView.widthAnchor.constraint(equalToConstant: 34),
+            logoView.heightAnchor.constraint(equalToConstant: 34),
+            brandRow.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 12),
+            center,
+            pad,
 
-                // Network-chip slot in the top-right corner. The controller
-                // installs its own button via `setNetworkChipView(_:)` and
-                // pins it to the container edges - we just reserve the slot.
-                networkChipContainer.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 4),
-                networkChipContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8)
-            ])
+            networkChipContainer.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 8),
+            networkChipContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+
+            hairline.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hairline.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hairline.bottomAnchor.constraint(equalTo: bottomAnchor),
+            hairline.heightAnchor.constraint(equalToConstant: 1)
+        ])
     }
 
-    /// Update the banner's height in points. Pass `0` to collapse.
-    public func setHeight(_ points: CGFloat) {
-        heightConstraint?.constant = max(0, points)
+    public override func layoutSubviews() {
+        super.layoutSubviews()
+        // Overlap guard (Android brand-row OnGlobalLayoutListener): if the
+        // centered brand would collide with the burger (56pt) or the
+        // network chip (8pt gap), left-align it with a 56pt start inset.
+        let chipHidden = networkChipContainer.subviews.first?.isHidden ?? true
+        let chipLeft = chipHidden ? bounds.width : networkChipContainer.frame.minX
+        let overlaps = brandRow.frame.minX < 56 || brandRow.frame.maxX > chipLeft - 8
+        let wantLeading = overlaps && !(burgerButton.isHidden && chipHidden)
+        if wantLeading != (brandLeading?.isActive ?? false) {
+            brandCenter?.isActive = !wantLeading
+            brandLeading?.isActive = wantLeading
+            setNeedsLayout()
+        }
     }
 
-    /// Install `view` (typically the network-chip button) into the
-    /// banner's top-right slot. Pinned to the container edges; the
-    /// container itself is anchored to the banner's top-right corner.
+    /// Android HomeActivity.setBandBottomPadding: 68 (home, the wallet
+    /// card overlaps by 56) / 12 (sub-screens, start).
+    public func setBandBottomPadding(_ points: CGFloat) {
+        bottomPadding?.constant = -max(0, points)
+    }
+
+    public func setBurgerHidden(_ hidden: Bool) {
+        burgerButton.isHidden = hidden
+    }
+
     public func setNetworkChipView(_ chip: UIView) {
         chip.removeFromSuperview()
         chip.translatesAutoresizingMaskIntoConstraints = false
         networkChipContainer.subviews.forEach { $0.removeFromSuperview() }
         networkChipContainer.addSubview(chip)
         NSLayoutConstraint.activate([
-                chip.topAnchor.constraint(equalTo: networkChipContainer.topAnchor),
-                chip.bottomAnchor.constraint(equalTo: networkChipContainer.bottomAnchor),
-                chip.leadingAnchor.constraint(equalTo: networkChipContainer.leadingAnchor),
-                chip.trailingAnchor.constraint(equalTo: networkChipContainer.trailingAnchor)
-            ])
-    }
-}
-
-// MARK: - UIColor ARGB hex helper
-
-fileprivate extension UIColor {
-    /// Decode an Android-style 0xAARRGGBB literal. Used for the banner
-    /// gradient stops in `gradient_layer.xml` which are alpha-prefixed.
-    convenience init(argbHex: UInt32) {
-        let a = CGFloat((argbHex >> 24) & 0xFF) / 255.0
-        let r = CGFloat((argbHex >> 16) & 0xFF) / 255.0
-        let g = CGFloat((argbHex >> 8) & 0xFF) / 255.0
-        let b = CGFloat( argbHex & 0xFF) / 255.0
-        self.init(red: r, green: g, blue: b, alpha: a)
+            chip.topAnchor.constraint(equalTo: networkChipContainer.topAnchor),
+            chip.bottomAnchor.constraint(equalTo: networkChipContainer.bottomAnchor),
+            chip.leadingAnchor.constraint(equalTo: networkChipContainer.leadingAnchor),
+            chip.trailingAnchor.constraint(equalTo: networkChipContainer.trailingAnchor)
+        ])
     }
 }
 
 // MARK: - Center strip
 
-/// Mirrors Android `home_activity.xml` (lines 125-280). Layout from top
-/// to bottom is:
-/// 1. Centered, multi-line address label (numberOfLines=2, bold 16pt).
-/// 2. Centered horizontal icon row: copy / block-explorer / refresh.
-/// 3. Bold balance label + spinner.
-/// 4. Three colored card buttons: Send (#FFB400), Receive (#1DCC70),
-/// Transactions (#55D0F0). Icon stacked above title.
+/// The wallet card (Android center_relative_layout_home_id on
+/// center_container.xml): address (14pt monospace), copy / explorer /
+/// refresh, balance (green placeholder), hairline, four glass tiles.
 public final class CenterStripView: UIView {
 
     public var onSend: (() -> Void)?
@@ -181,48 +159,31 @@ public final class CenterStripView: UIView {
 
     public var currentAddress: String = "" { didSet { addressLabel.text = currentAddress } }
 
+    private let cardView = CenterContainerView()
     private let addressLabel = UILabel()
     private let balanceLabel = UILabel()
     private let copyButton = UIButton(type: .system)
     private let exploreButton = UIButton(type: .system)
-    /// In-place icon/spinner swap matching Android's `ProgressBar`
-    /// swap-in / swap-out on the address strip's refresh button.
-    /// Replaces the separate `progress` indicator that previously
-    /// rendered below `balanceLabel`.
     private let refreshSwap = RefreshIconSwap(image: UIImage(named: "retry"))
 
     public override init(frame: CGRect) {
         super.init(frame: frame)
-        // Android `textView_home_wallet_address` (`maxLines=2`,
-        // `textAlignment=center`, `textSize=16dp`, `textStyle=bold`).
-        // iOS bold-system at 14pt visually matches Android's bold 16dp
-        // due to font-metric differences between the platforms.
-        addressLabel.font = Typography.boldTitle(14)
-        addressLabel.textColor = UIColor(named: "colorCommon3") ?? .label
+        backgroundColor = .clear
+        cardView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(cardView)
+
+        addressLabel.font = UIFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        addressLabel.textColor = UIColor(named: "colorCommon6") ?? .label
         addressLabel.numberOfLines = 2
         addressLabel.lineBreakMode = .byCharWrapping
         addressLabel.textAlignment = .center
 
         balanceLabel.font = Typography.body(20)
-        balanceLabel.textColor = .label
-        // Show the "unknown balance" dash placeholder until the first
-        // successful fetch on the post-unlock home screen. Mirrors the
-        // Android `home_activity.xml` initial `-` glyph so users see a
-        // consistent value rather than an empty pill while the network
-        // call is in flight.
+        balanceLabel.textColor = .quantumGreen
         balanceLabel.text = CoinUtils.UNKNOWN_BALANCE_PLACEHOLDER
 
-        // All three address-action icons use the same 5pt inset so
-        // their artworks render at matching sizes. The Android source
-        // applied per-icon padding (5dp on copy / explore, 0dp on
-        // refresh) to compensate for whitespace baked into the
-        // original `retry.xml` vector. Now that `retry.svg` ships
-        // with a tightly-cropped viewBox (matching copy / explore),
-        // a uniform 5pt inset keeps all three icons visually equal.
-        configureIcon(copyButton, image: "copy_outline",
-            inset: 5, action: #selector(tapCopy))
-        configureIcon(exploreButton, image: "address_explore",
-            inset: 5, action: #selector(tapExplore))
+        configureIcon(copyButton, image: "copy_outline", inset: 5, action: #selector(tapCopy))
+        configureIcon(exploreButton, image: "address_explore", inset: 5, action: #selector(tapExplore))
         refreshSwap.onTap = { [weak self] in self?.onRefresh?() }
         refreshSwap.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -230,90 +191,62 @@ public final class CenterStripView: UIView {
             refreshSwap.heightAnchor.constraint(equalToConstant: 40)
         ])
 
-        // Center the three address-action icons in their own horizontal
-        // stack mirroring Android `home_activity.xml:136-200`.
-        let iconRow = UIStackView(arrangedSubviews: [copyButton,
-                exploreButton,
-                refreshSwap])
+        let iconRow = UIStackView(arrangedSubviews: [copyButton, exploreButton, refreshSwap])
         iconRow.axis = .horizontal
         iconRow.spacing = 24
         iconRow.alignment = .center
 
         let cardRow = makeActionRow()
 
-        // Thin rule below the balance and above the action cards,
-        // mirroring the `<View ... line_2_shape alpha=0.2 ...>` at
-        // home_activity.xml:232-238 (1dp tall, 20dp top/bottom margin).
         let balanceRule = UIView()
-        balanceRule.backgroundColor = (UIColor(named: "colorCommon6") ?? .label)
-        .withAlphaComponent(0.2)
+        balanceRule.backgroundColor = UIColor.white.withAlphaComponent(0.08)
         balanceRule.translatesAutoresizingMaskIntoConstraints = false
         balanceRule.heightAnchor.constraint(equalToConstant: 1).isActive = true
 
-        let stack = UIStackView(arrangedSubviews: [
-                addressLabel, iconRow, balanceLabel, balanceRule, cardRow
-            ])
+        let stack = UIStackView(arrangedSubviews: [addressLabel, iconRow, balanceLabel, balanceRule, cardRow])
         stack.axis = .vertical
         stack.alignment = .center
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        // Android pads the rule with 20dp above and below; replicate
-        // the breathing room with custom spacing on the stack.
+        cardView.addSubview(stack)
         stack.setCustomSpacing(20, after: balanceLabel)
         stack.setCustomSpacing(20, after: balanceRule)
         NSLayoutConstraint.activate([
-                stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-                stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-                stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-                stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            cardView.topAnchor.constraint(equalTo: topAnchor),
+            cardView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            cardView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            cardView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
 
-                // Address fills the strip width so it can wrap to two lines
-                // with center alignment, matching Android's `match_parent`.
-                addressLabel.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-                addressLabel.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: cardView.topAnchor, constant: 16),
+            stack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor, constant: -16),
+            stack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor, constant: -16),
 
-                // The stack uses .center alignment, which collapses a
-                // zero-intrinsic-width view to nothing. Pin the rule's
-                // width to the stack so it stretches edge-to-edge.
-                balanceRule.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            addressLabel.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            addressLabel.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            balanceRule.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            cardRow.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            cardRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor)
+        ])
 
-                // Card row also fills the strip width so the three cards can
-                // size equally with the spacing reserved between them.
-                cardRow.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-                cardRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor)
-            ])
-
-        // Uniform press feedback (alpha-dim) on every tappable surface
-        // inside the strip - the three address-action icons and the
-        // three action cards. See `Components/PressFeedback.swift`.
         installPressFeedbackRecursive()
     }
     required init?(coder: NSCoder) { fatalError() }
 
     public func setBalance(_ text: String) { balanceLabel.text = text }
-    /// Toggles the refresh-icon-swap (icon vs. spinner) on the
-    /// address strip. Mirrors the Android in-place swap on the
-    /// home address bar refresh button.
     public func setBalance(loading: Bool) {
         refreshSwap.setLoading(loading)
     }
 
-    /// Re-applies the refresh spinner when the strip becomes visible
-    /// again after `isHidden` (Send / Receive). UIKit does not always
-    /// repaint an activity indicator that started while off-screen.
     public func refreshBalanceLoadingAppearanceIfNeeded() {
         refreshSwap.setLoading(refreshSwap.isShowingLoading)
     }
 
-    /// Gray out the refresh affordance while the scan API is in a 429
-    /// backoff window so repeated taps do not stack error dialogs.
     public func setRefreshEnabled(_ enabled: Bool) {
         refreshSwap.isEnabled = enabled
     }
 
     @objc private func tapCopy() {
-        // Address-strip copy. Hardened wrapper.
         Pasteboard.copySensitive(currentAddress)
         Toast.showMessage(Localization.shared.getCopiedByLangValues())
     }
@@ -323,60 +256,32 @@ public final class CenterStripView: UIView {
     @objc private func tapTransactions() { onTransactions?() }
     @objc private func tapSwap() { onSwap?() }
 
-    private func configureIcon(_ b: UIButton,
-        image name: String,
-        inset: CGFloat,
-        action: Selector) {
+    private func configureIcon(_ b: UIButton, image name: String, inset: CGFloat, action: Selector) {
         let img = UIImage(named: name)?.withRenderingMode(.alwaysTemplate)
         b.setImage(img, for: .normal)
-        // `.label` is the system-managed dynamic primary content
-        // color: black in light mode, white in dark mode. Identical
-        // semantics to `colorCommon6`, but uses iOS's built-in
-        // resolution path which avoids any asset-catalog edge cases.
-        b.tintColor = .label
+        b.tintColor = .white
         b.imageView?.contentMode = .scaleAspectFit
-        // `contentEdgeInsets` mirrors Android's `android:padding`
-        // per-icon values from `home_activity.xml` (copy / explore =
-        // 5dp, refresh = 0dp). Without this, `retry.pdf` (which has
-        // more inherent whitespace than the other PDFs) renders
-        // visually smaller than copy / explore inside the same frame.
-        b.contentEdgeInsets = UIEdgeInsets(top: inset, left: inset,
-            bottom: inset, right: inset)
+        b.contentEdgeInsets = UIEdgeInsets(top: inset, left: inset, bottom: inset, right: inset)
         b.addTarget(self, action: action, for: .touchUpInside)
         b.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-                b.widthAnchor.constraint(equalToConstant: 40),
-                b.heightAnchor.constraint(equalToConstant: 40)
-            ])
+            b.widthAnchor.constraint(equalToConstant: 40),
+            b.heightAnchor.constraint(equalToConstant: 40)
+        ])
     }
 
-    /// Send / Receive / Transactions / Swap colored card buttons.
-    /// Quantum Violet palette: accent violet, green, cyan, soft violet.
+    /// Desktop action tiles: glass fills amber / emerald / blue / magenta
+    /// with 1pt strokes and white icons (Android tile_press_overlay).
     private func makeActionRow() -> UIStackView {
         let L = Localization.shared
-        let send = makeCardActionButton(
-            icon: "arrow_up",
-            bg: UIColor(named: "colorAccent")
-                ?? UIColor(red: 0.424, green: 0.231, blue: 1.0, alpha: 1.0),
-            title: L.getSendByLangValues(),
-            action: #selector(tapSend))
-        let recv = makeCardActionButton(
-            icon: "arrow_down_outline",
-            bg: UIColor(named: "colorGreen")
-                ?? UIColor(red: 0.204, green: 0.827, blue: 0.600, alpha: 1.0),
-            title: L.getReceiveByLangValues(),
-            action: #selector(tapReceive))
-        let txn = makeCardActionButton(
-            icon: "document",
-            bg: UIColor(red: 0.0, green: 0.898, blue: 1.0, alpha: 1.0),
-            title: L.getTransactionsByLangValues(),
-            action: #selector(tapTransactions))
-        let swap = makeCardActionButton(
-            icon: "arrow_up",
-            bg: UIColor(named: "colorCommon1")
-                ?? UIColor(red: 0.608, green: 0.451, blue: 1.0, alpha: 1.0),
-            title: L.lang("swap", fallback: "Swap"),
-            action: #selector(tapSwap))
+        let send = makeCardActionButton(icon: "arrow_up", fill: 0x24F59E0B, stroke: 0x99F59E0B,
+                                        iconInset: 13, title: L.getSendByLangValues(), action: #selector(tapSend))
+        let recv = makeCardActionButton(icon: "arrow_down_outline", fill: 0x2410B981, stroke: 0x9910B981,
+                                        iconInset: 15, title: L.getReceiveByLangValues(), action: #selector(tapReceive))
+        let txn = makeCardActionButton(icon: "document", fill: 0x243B82F6, stroke: 0x993B82F6,
+                                       iconInset: 15, title: L.getTransactionsByLangValues(), action: #selector(tapTransactions))
+        let swap = makeCardActionButton(icon: nil, fill: 0x24D946EF, stroke: 0x99D946EF,
+                                        iconInset: 15, title: L.lang("swap", fallback: "Swap"), action: #selector(tapSwap))
         let row = UIStackView(arrangedSubviews: [send, recv, txn, swap])
         row.axis = .horizontal
         row.distribution = .fillEqually
@@ -384,55 +289,35 @@ public final class CenterStripView: UIView {
         return row
     }
 
-    /// Vertical card: 64x64 colored rounded rectangle hosting a white
-    /// SF symbol, with the text label below in `colorCommon1`.
-    private func makeCardActionButton(icon: String,
-        bg: UIColor,
-        title: String,
-        action: Selector) -> UIView {
-        let card = UIControl()
-        card.backgroundColor = bg
-        card.layer.cornerRadius = 12
+    private func makeCardActionButton(icon: String?, fill: UInt32, stroke: UInt32, iconInset: CGFloat,
+                                      title: String, action: Selector) -> UIView {
+        let card = TileControl()
+        card.baseFill = UIColor(argbHex: fill)
+        card.backgroundColor = UIColor(argbHex: fill)
+        card.layer.cornerRadius = 10
         card.layer.cornerCurve = .continuous
-        // Soft drop shadow that mirrors Android's
-        // `app:cardElevation="12dp"` on each `CardView`. Keep
-        // `masksToBounds = false` so the shadow renders outside the
-        // rounded card; the icon is centered well inside the bounds
-        // so corner clipping isn't required for the content.
-        card.layer.shadowColor = UIColor.black.cgColor
-        card.layer.shadowOffset = CGSize(width: 0, height: 2)
-        card.layer.shadowRadius = 4
-        card.layer.shadowOpacity = 0.20
-        card.layer.masksToBounds = false
+        card.layer.borderWidth = 1
+        card.layer.borderColor = UIColor(argbHex: stroke).cgColor
         card.translatesAutoresizingMaskIntoConstraints = false
         card.addTarget(self, action: action, for: .touchUpInside)
-        let iv = UIImageView(image:
-            UIImage(named: icon)?.withRenderingMode(.alwaysTemplate))
-        // `.label` adapts with the system appearance: black in light
-        // mode, white in dark mode. Same treatment as the wallets-list
-        // tile glyphs (`WalletsViewController.makeIconTile`) and the
-        // address-action row above.
-        iv.tintColor = .label
+        let image = icon.flatMap { UIImage(named: $0) } ?? UIImage(systemName: "arrow.left.arrow.right")
+        let iv = UIImageView(image: image?.withRenderingMode(.alwaysTemplate))
+        iv.tintColor = .white
         iv.contentMode = .scaleAspectFit
         iv.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(iv)
         NSLayoutConstraint.activate([
-                card.heightAnchor.constraint(equalToConstant: 64),
-                card.widthAnchor.constraint(equalToConstant: 64),
-                iv.widthAnchor.constraint(equalToConstant: 28),
-                iv.heightAnchor.constraint(equalToConstant: 28),
-                iv.centerXAnchor.constraint(equalTo: card.centerXAnchor),
-                iv.centerYAnchor.constraint(equalTo: card.centerYAnchor)
-            ])
+            card.heightAnchor.constraint(equalToConstant: 64),
+            card.widthAnchor.constraint(equalToConstant: 64),
+            iv.topAnchor.constraint(equalTo: card.topAnchor, constant: iconInset),
+            iv.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -iconInset),
+            iv.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: iconInset),
+            iv.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -iconInset)
+        ])
 
         let label = UILabel()
         label.text = title
         label.font = Typography.body(12)
-        // Match the brand purple used by the symbol column on the
-        // tokens dialog (`HomeMainViewController` line ~429), so the
-        // Send / Receive / Transactions captions read in the same hue
-        // as the asset symbols above the table in both light and dark
-        // mode (`colorPrimary` is identical in both traits).
         label.textColor = UIColor(named: "colorPrimary") ?? .systemPurple
         label.textAlignment = .center
 
@@ -441,6 +326,31 @@ public final class CenterStripView: UIView {
         col.alignment = .center
         col.spacing = 4
         return col
+    }
+}
+
+/// Android tile_press_overlay: #26FFFFFF overlay while pressed.
+final class TileControl: UIControl {
+    var baseFill: UIColor = .clear
+    override var isHighlighted: Bool {
+        didSet {
+            backgroundColor = isHighlighted
+                ? baseFill.blended(with: UIColor(argbHex: 0x26FFFFFF)) : baseFill
+        }
+    }
+}
+
+private extension UIColor {
+    func blended(with top: UIColor) -> UIColor {
+        var r1: CGFloat = 0, g1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
+        var r2: CGFloat = 0, g2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
+        getRed(&r1, green: &g1, blue: &b1, alpha: &a1)
+        top.getRed(&r2, green: &g2, blue: &b2, alpha: &a2)
+        let a = a2 + a1 * (1 - a2)
+        guard a > 0 else { return .clear }
+        return UIColor(red: (r2 * a2 + r1 * a1 * (1 - a2)) / a,
+                       green: (g2 * a2 + g1 * a1 * (1 - a2)) / a,
+                       blue: (b2 * a2 + b1 * a1 * (1 - a2)) / a, alpha: a)
     }
 }
 
@@ -486,110 +396,4 @@ public final class OfflineOverlayView: UIView {
     }
 
     @objc private func tapRetry() { onRetry?() }
-}
-
-// MARK: - Bottom nav
-
-public final class BottomNavView: UIView {
-
-    public enum Tab { case wallets, settings }
-
-    public var onSelect: ((Tab) -> Void)?
-
-    public override init(frame: CGRect) {
-        super.init(frame: frame)
-        // Transparent so the bottom nav blends with the parent
-        // controller's background instead of standing out as a
-        // distinct card. Mirrors Android's `colorCommon7` (which
-        // collapses to the surface color in both themes).
-        backgroundColor = .clear
-        let L = Localization.shared
-        // Two-tab bottom nav: Wallets + Settings. Icons sourced from
-        // the `m_*` template imagesets so they tint with
-        // `colorCommon6` and read identically in light / dark mode.
-        let b1 = makeTab("m_wallets", title: L.getWalletsByLangValues(), tag: 0)
-        let b4 = makeTab("m_settings", title: L.getSettingsByLangValues(), tag: 3)
-        let stack = UIStackView(arrangedSubviews: [b1, b4])
-        stack.axis = .horizontal
-        stack.distribution = .fillEqually
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        // Constrain the two-tab cluster to the centre half of the
-        // bottom-nav strip rather than spreading the icons edge-to-
-        // edge. With `.fillEqually` each tab then occupies a quarter
-        // of the strip width and the two icons centre around the
-        // 3/8 and 5/8 marks - visually tucked together near the
-        // middle, matching the user-requested layout after removing
-        // the Help and Block Explorer tabs.
-        NSLayoutConstraint.activate([
-                stack.topAnchor.constraint(equalTo: topAnchor),
-                stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-                stack.centerXAnchor.constraint(equalTo: centerXAnchor),
-                stack.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.5),
-                heightAnchor.constraint(equalToConstant: 56)
-            ])
-
-        // Apply alpha-dim press feedback to all tab UIControls.
-        installPressFeedbackRecursive()
-    }
-    required init?(coder: NSCoder) { fatalError() }
-
-    /// Icon-on-top, label-below tab matching Android's Material
-    /// `BottomNavigationView` (`labelVisibilityMode="labeled"`). The
-    /// icon view is pinned to 24x24 explicitly so all four tabs render
-    /// at the same visual size regardless of the inherent path
-    /// bounds inside each PDF asset.
-    private func makeTab(_ icon: String, title: String, tag: Int) -> UIControl {
-        let tab = UIControl()
-        tab.tag = tag
-        tab.backgroundColor = .clear
-
-        let iv = UIImageView(
-            image: UIImage(named: icon)?.withRenderingMode(.alwaysTemplate))
-        iv.tintColor = UIColor(named: "colorCommon6") ?? .label
-        iv.contentMode = .scaleAspectFit
-        iv.translatesAutoresizingMaskIntoConstraints = false
-
-        let label = UILabel()
-        label.text = title
-        label.font = Typography.body(11)
-        label.textColor = UIColor(named: "colorCommon6") ?? .label
-        label.textAlignment = .center
-        label.numberOfLines = 1
-        label.adjustsFontSizeToFitWidth = true
-        label.minimumScaleFactor = 0.8
-
-        let column = UIStackView(arrangedSubviews: [iv, label])
-        column.axis = .vertical
-        column.alignment = .center
-        column.spacing = 2
-        column.isUserInteractionEnabled = false
-        column.translatesAutoresizingMaskIntoConstraints = false
-        tab.addSubview(column)
-
-        NSLayoutConstraint.activate([
-                iv.widthAnchor.constraint(equalToConstant: 24),
-                iv.heightAnchor.constraint(equalToConstant: 24),
-                column.centerXAnchor.constraint(equalTo: tab.centerXAnchor),
-                column.centerYAnchor.constraint(equalTo: tab.centerYAnchor),
-                column.leadingAnchor.constraint(
-                    greaterThanOrEqualTo: tab.leadingAnchor, constant: 4),
-                column.trailingAnchor.constraint(
-                    lessThanOrEqualTo: tab.trailingAnchor, constant: -4)
-            ])
-
-        tab.addAction(UIAction(handler: { [weak self] _ in
-                self?.dispatchTap(tag: tag)
-            }), for: .touchUpInside)
-        return tab
-    }
-
-    private func dispatchTap(tag: Int) {
-        let tab: Tab
-        switch tag {
-            case 0: tab = .wallets
-            default: tab = .settings
-        }
-        onSelect?(tab)
-    }
 }

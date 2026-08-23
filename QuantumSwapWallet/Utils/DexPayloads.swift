@@ -29,6 +29,18 @@ public enum DexPayloads {
         return p
     }
 
+    /// Chain fields captured now (chainId, rpcEndpoint, release
+    /// addresses). The tx-steps dialog captures this once at open and
+    /// overlays it on every step payload so a network switch mid-flow
+    /// cannot re-target a later step (Android TxStepsDialog.chainSnapshot).
+    public static func chainSnapshot() -> [String: Any] { base() }
+
+    /// Shallow key-by-key copy of `source` over `target`
+    /// (Android TxStepsDialog.overlay).
+    public static func overlay(_ target: inout [String: Any], _ source: [String: Any]) {
+        for (k, v) in source { target[k] = v }
+    }
+
     /// `base()` + `advancedSigning`, plus key bytes for binary staging.
     /// Keys are NOT placed in the JSON (iOS pull-binary channel).
     public static func withKeys(privKey: Data, pubKey: Data) -> Keyed {
@@ -53,27 +65,13 @@ public enum DexBridgeResult {
         return inner
     }
 
-    /// Parse gas from an estimate response with desktop-style 20% pad.
-    public static func parseGas(_ json: String, fallback: Int64) -> Int64 {
-        do {
-            let data = try unwrapData(json)
-            let raw = data["gasLimit"]
-            let v: Int64
-            if let s = raw as? String, let n = Int64(s) {
-                v = n
-            } else if let n = raw as? Int64 {
-                v = n
-            } else if let n = raw as? Int {
-                v = Int64(n)
-            } else if let n = raw as? NSNumber {
-                v = n.int64Value
-            } else {
-                return fallback
-            }
-            return max(fallback, (v * 12) / 10)
-        } catch {
-            return fallback
-        }
+    /// Coerce a loosely-typed JSON number (String / Int / NSNumber).
+    public static func int64(_ raw: Any?) -> Int64? {
+        if let s = raw as? String { return Int64(s.trimmingCharacters(in: .whitespaces)) }
+        if let n = raw as? Int64 { return n }
+        if let n = raw as? Int { return Int64(n) }
+        if let n = raw as? NSNumber { return n.int64Value }
+        return nil
     }
 
     public static func sanitizeError(_ s: String?) -> String {

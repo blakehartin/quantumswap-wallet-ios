@@ -4,7 +4,7 @@
 [![Swift: 5.9](https://img.shields.io/badge/swift-5.9-orange)](https://swift.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-> **Android counterpart:** the sibling [Quantum Coin Android wallet](https://github.com/quantumcoinproject/quantum-coin-wallet-android)
+> **Android counterpart:** the sibling [Quantum Coin Android wallet](https://github.com/quantumcoinproject/quantumswap-wallet-android)
 > is kept feature-parity with this iOS client. Both share the same
 > JavaScript SDK bundle byte-for-byte and the same `en_us.json`
 > localization catalog as the canonical reference; the v=3 strongbox
@@ -24,13 +24,13 @@ and [consensus whitepaper](https://quantumcoin.org/whitepapers/Quantum-Coin-Bloc
 for the protocol-level rationale.
 
 This repository hosts the **iOS** wallet. It is a feature-parity port
-of the [Quantum Coin Android wallet](https://github.com/quantumcoinproject/quantum-coin-wallet-android)
+of the [Quantum Coin Android wallet](https://github.com/quantumcoinproject/quantumswap-wallet-android)
 and shares the same JavaScript SDK bundle byte-for-byte, so every
 signed transaction is reproducible across both clients.
 
 > **Status:** beta. The mainnet RPC is configured at
 > `https://public.rpc.quantumcoinapi.com` (chain id `123123`). See
-> [`Resources/blockchain_networks.json`](QuantumCoinWallet/Resources/blockchain_networks.json).
+> [`Resources/blockchain_networks.json`](QuantumSwapWallet/Resources/blockchain_networks.json).
 
 > **This software is not an investment opportunity, an investment
 > contract, or a security of any type.** See the
@@ -65,7 +65,7 @@ signed transaction is reproducible across both clients.
   layered-encrypted strongbox; each wallet is addressable via the
   Wallets screen (`Screens/WalletsViewController.swift`).
 - **New wallet creation** with a 32-word seed phrase (
-  `QuantumCoinSDK.Wallet.createRandom` →
+  `QuantumSwapSDK.Wallet.createRandom` →
   `SeedWordsSDK.getWordListFromSeedArray`). Seed verification quiz
   is enforced before the wallet is persisted.
 - **Restore from seed words** with BIP39-style prefix
@@ -179,7 +179,7 @@ signed transaction is reproducible across both clients.
   (`Backup/RestoreFlow.swift`).
 - **Cross-platform backup compatibility.** Per-wallet exported
   `.wallet` files are produced by the shared
-  `quantumcoin-bundle.js` `Wallet.encryptSync` call on both
+  `quantumswap-bundle.js` `Wallet.encryptSync` call on both
   platforms, so a `.wallet` file written by the iOS wallet can be
   restored by the Android wallet (and vice versa) using the same
   backup password. The whole-strongbox slot
@@ -361,22 +361,22 @@ Android both write and read byte-for-byte. The authoritative
 source is the code; every constant quoted below is a direct
 citation from the cited files, and the same constants appear in
 the Android sibling repo's
-[`STORAGE_LAYERED_MODEL.md`](https://github.com/quantumcoinproject/quantum-coin-wallet-android/blob/main/STORAGE_LAYERED_MODEL.md).
+[`STORAGE_LAYERED_MODEL.md`](https://github.com/quantumcoinproject/quantumswap-wallet-android/blob/main/STORAGE_LAYERED_MODEL.md).
 
 ### 1. Layered model
 
 The strongbox is built as five disjoint layers. Each layer
 knows about the layer immediately below it and about nothing
 above it; cross-layer leakage is enforced by review and by
-invariant tests in `QuantumCoinWalletTests/StrongboxLayerTests.swift`.
+invariant tests in `QuantumSwapWalletTests/StrongboxLayerTests.swift`.
 
 | Layer | Responsibility | Source |
 | --- | --- | --- |
-| L1 — Storage | Two-slot atomic-rotate with deep verify | `QuantumCoinWallet/Storage/AtomicSlotWriter.swift` |
-| L2 — Schema | Outer file envelope, file-level MAC, padding | `QuantumCoinWallet/Schema/StrongboxFileCodec.swift`, `QuantumCoinWallet/Schema/StrongboxPadding.swift` |
-| L3 — Crypto | AES-256-GCM, HMAC-SHA-256, HKDF-SHA-256, scrypt | `QuantumCoinWallet/Crypto/Aead.swift`, `QuantumCoinWallet/Crypto/Mac.swift`, `QuantumCoinWallet/Crypto/PasswordKdf.swift` |
-| L4 — Unlock coordinator | scrypt → unwrap mainKey → install snapshot; re-derive per write; zeroize | `QuantumCoinWallet/KeyMaterial/UnlockCoordinatorV2.swift` |
-| L5 — Strongbox accessor | In-memory typed snapshot, inner checksum, per-wallet wire codec | `QuantumCoinWallet/Strongbox/Strongbox.swift`, `QuantumCoinWallet/Strongbox/StrongboxPayload.swift`, `QuantumCoinWallet/Strongbox/WalletEntryCodec.swift` |
+| L1 — Storage | Two-slot atomic-rotate with deep verify | `QuantumSwapWallet/Storage/AtomicSlotWriter.swift` |
+| L2 — Schema | Outer file envelope, file-level MAC, padding | `QuantumSwapWallet/Schema/StrongboxFileCodec.swift`, `QuantumSwapWallet/Schema/StrongboxPadding.swift` |
+| L3 — Crypto | AES-256-GCM, HMAC-SHA-256, HKDF-SHA-256, scrypt | `QuantumSwapWallet/Crypto/Aead.swift`, `QuantumSwapWallet/Crypto/Mac.swift`, `QuantumSwapWallet/Crypto/PasswordKdf.swift` |
+| L4 — Unlock coordinator | scrypt → unwrap mainKey → install snapshot; re-derive per write; zeroize | `QuantumSwapWallet/KeyMaterial/UnlockCoordinatorV2.swift` |
+| L5 — Strongbox accessor | In-memory typed snapshot, inner checksum, per-wallet wire codec | `QuantumSwapWallet/Strongbox/Strongbox.swift`, `QuantumSwapWallet/Strongbox/StrongboxPayload.swift`, `QuantumSwapWallet/Strongbox/WalletEntryCodec.swift` |
 
 ### 2. On-disk slot layout (L1)
 
@@ -559,7 +559,7 @@ partial-decrypt or post-decrypt memory-corruption bugs
 
 **Bundled MAINNET is not in the payload.** The bundled MAINNET
 chain config is loaded from
-`QuantumCoinWallet/Resources/blockchain_networks.json` at every
+`QuantumSwapWallet/Resources/blockchain_networks.json` at every
 `applyDecryptedConfig` call and prepended to `customNetworks`,
 so the resource is the canonical source for the default chain
 and the per-strongbox file size is unaffected by the default
@@ -571,9 +571,9 @@ Each entry inside `wallets[<idxStr>]` is a base64-wrapped
 length-prefixed binary blob with the following layout. **All
 multi-byte integers are big-endian.** This format is shared
 byte-for-byte with the Android wallet — see
-`QuantumCoinWallet/Strongbox/WalletEntryCodec.swift`
+`QuantumSwapWallet/Strongbox/WalletEntryCodec.swift`
 (`testWireFormatSpecExactBytes` in
-`QuantumCoinWalletTests/WalletEntryCodecTests.swift` pins the
+`QuantumSwapWalletTests/WalletEntryCodecTests.swift` pins the
 exact bytes).
 
 | Offset | Field | Width | Encoding |
@@ -618,13 +618,13 @@ State lives in a Keychain generic-password item, JSON-encoded
 `kSecAttrSynchronizable = false`. Schedule: counts <5 → no
 delay; 5 → 30 s; 6 → 60 s; 7 → 120 s; ≥8 capped at 300 s. The
 limiter is consulted at strongbox-unlock and at backup-decrypt.
-Source: `QuantumCoinWallet/Security/UnlockAttemptLimiter.swift`.
+Source: `QuantumSwapWallet/Security/UnlockAttemptLimiter.swift`.
 
 ### 11. Out-of-strongbox metadata (`PrefConnect`)
 
 The non-secret app preferences live in
 `Application Support/DP_QUANTUM_COIN_WALLET_APP_PREF.json`,
-managed by `QuantumCoinWallet/Storage/PrefConnect.swift`. The
+managed by `QuantumSwapWallet/Storage/PrefConnect.swift`. The
 allowlist is enumerated in `PrefKeys`:
 
 | Key | Reason it is here, not in the strongbox |
@@ -643,7 +643,7 @@ in `PrefConnect`; it lives only in the encrypted payload.
 
 ### 12. iCloud / Finder backup exclusion
 
-`QuantumCoinWallet/Backup/BackupExclusion.swift` sets
+`QuantumSwapWallet/Backup/BackupExclusion.swift` sets
 `URLResourceValues.isExcludedFromBackup` on every slot file
 according to `PrefConnect.BACKUP_ENABLED_KEY`. The flag is
 re-applied after every slot promote so a `rename(2)` that
@@ -660,9 +660,9 @@ replaces the inode does not silently re-include the file.
 
 The user-facing **per-wallet backup file** (`UTC--<timestamp>--<addr>.wallet`)
 is a different format. It is produced and consumed by the
-shared `QuantumCoinSDK.Wallet.encryptSync` /
-`Wallet.decryptSync` calls in `quantumcoin-bundle.js`, called
-from `QuantumCoinWallet/JsBridge/JsBridge.swift`. It is a
+shared `QuantumSwapSDK.Wallet.encryptSync` /
+`Wallet.decryptSync` calls in `quantumswap-bundle.js`, called
+from `QuantumSwapWallet/JsBridge/JsBridge.swift`. It is a
 Web3-Secret-Storage-style JSON blob (scrypt KDF, AES + MAC,
 address-bound) keyed by a user-supplied **backup password** that
 is collected separately from the strongbox password and may
@@ -670,7 +670,7 @@ legitimately differ. The `.wallet` envelope is byte-equivalent
 across iOS and Android (both call the same JS SDK), which is
 why the per-wallet backup file format **is** cross-platform
 restorable. See
-[`Backup/CloudBackupManager.swift`](QuantumCoinWallet/Backup/CloudBackupManager.swift)
+[`Backup/CloudBackupManager.swift`](QuantumSwapWallet/Backup/CloudBackupManager.swift)
 for the file naming and folder enumeration; the JSON shape itself
 is owned by the SDK package.
 
@@ -678,7 +678,7 @@ is owned by the SDK package.
 
 The binding portability contract is the seeded vector suite:
 
-- iOS: `QuantumCoinWalletTests/StrongboxPortabilityVectorTests.swift`
+- iOS: `QuantumSwapWalletTests/StrongboxPortabilityVectorTests.swift`
   (plus the dedicated `StrongboxPaddingTests`,
   `StrongboxPayloadV3Tests`, `StrongboxFileCodecScryptValidationTests`,
   `WalletEntryCodecTests`, and
@@ -703,7 +703,7 @@ inside the tests rather than checked into the repository.
 Every password the user enters — the strongbox unlock password, a
 new strongbox password at create-wallet time, and per-wallet backup
 file passwords — flows through one reusable component,
-[`Components/PasswordTextField.swift`](QuantumCoinWallet/Components/PasswordTextField.swift).
+[`Components/PasswordTextField.swift`](QuantumSwapWallet/Components/PasswordTextField.swift).
 That single owner is what lets the app cooperate with the iOS
 Passwords app (QuickType / iCloud Keychain) without ever calling a
 `SecItem` API itself: **iOS owns the save and autofill UI
@@ -735,15 +735,15 @@ iOS only proactively offers strong-password generation, and only
 scopes a saved credential to the right Keychain account, when a
 `.username` field sits next to the password field **in the same
 visible container**. The app supplies one via
-[`UsernameField.make(_:)`](QuantumCoinWallet/Components/CredentialIdentifier.swift),
+[`UsernameField.make(_:)`](QuantumSwapWallet/Components/CredentialIdentifier.swift),
 whose value comes from `CredentialIdentifier` (never typed by the
 user) and encodes three isolation guarantees:
 
 | Context | Username shape |
 | --- | --- |
-| Strongbox unlock / create | `QuantumCoin-<deviceSuffix>` |
-| Per-wallet backup (`.create` / `.restoreSingle`) | `QuantumCoin-backup-<address>-<deviceSuffix>` |
-| Batch restore (`.restoreBatch`) | `QuantumCoin-backup-<deviceSuffix>` |
+| Strongbox unlock / create | `QuantumSwap-<deviceSuffix>` |
+| Per-wallet backup (`.create` / `.restoreSingle`) | `QuantumSwap-backup-<address>-<deviceSuffix>` |
+| Batch restore (`.restoreBatch`) | `QuantumSwap-backup-<deviceSuffix>` |
 
 - **Context isolation** — distinct strongbox vs. backup prefixes mean
   a save in one context can never overwrite the other's slot.
@@ -772,9 +772,9 @@ When the user picks an **existing** credential, iOS fills the
 password field but not the paired "Retype / Confirm" field. To avoid
 a confusing mismatch error, `PasswordTextField` exposes
 `onAutoFill`, which the create-wallet screen
-([`Screens/HomeWalletViewController.swift`](QuantumCoinWallet/Screens/HomeWalletViewController.swift))
+([`Screens/HomeWalletViewController.swift`](QuantumSwapWallet/Screens/HomeWalletViewController.swift))
 and the backup `.create` dialog
-([`Dialogs/BackupPasswordDialog.swift`](QuantumCoinWallet/Dialogs/BackupPasswordDialog.swift))
+([`Dialogs/BackupPasswordDialog.swift`](QuantumSwapWallet/Dialogs/BackupPasswordDialog.swift))
 use to mirror the autofilled value into the confirm field.
 
 Mirroring is deliberately **not** triggered by a user-initiated
@@ -792,7 +792,7 @@ The same hook records how the current value was produced via
 `PasswordTextField.InputSource` (`.typed` / `.pasted` /
 `.autoFilled`), surfaced on the dialog as `passwordInputSource`. When
 a backup restore decrypts no wallet
-([`Backup/RestoreFlow.swift`](QuantumCoinWallet/Backup/RestoreFlow.swift)),
+([`Backup/RestoreFlow.swift`](QuantumSwapWallet/Backup/RestoreFlow.swift)),
 the error message branches:
 
 - `.autoFilled` → `restore-try-different-password-autofill`, which
@@ -861,7 +861,7 @@ The slot file itself carries exactly
 hard-reject any slot whose `wrap` object contains extraneous
 fields. If a future biometric-unlock UI is added on iOS, its
 per-device wrap-key state must live in a sibling sidecar file
-(see [`QuantumCoinWallet/KeyMaterial/KeychainWrapSidecar.swift`](QuantumCoinWallet/KeyMaterial/KeychainWrapSidecar.swift))
+(see [`QuantumSwapWallet/KeyMaterial/KeychainWrapSidecar.swift`](QuantumSwapWallet/KeyMaterial/KeychainWrapSidecar.swift))
 so the slot file stays byte-identical to the Android
 implementation; the slot envelope is reserved for the
 cross-platform shared contract.
@@ -905,20 +905,20 @@ either side.
 
 Every Android strongbox test under
 `app/src/test/java/com/quantumcoin/app/strongbox/` has a Swift
-counterpart under [`QuantumCoinWalletTests/`](QuantumCoinWalletTests),
+counterpart under [`QuantumSwapWalletTests/`](QuantumSwapWalletTests),
 sharing the same 32-byte seed and SHAKE-256 expansion contract
 documented in
 [`tests/fixtures/strongbox-v3-vectors/INDEX.md`](tests/fixtures/strongbox-v3-vectors/INDEX.md):
 
 | Android source | Swift port |
 | --- | --- |
-| `DeterministicSecureRandomSource.java` | [`DeterministicSecureRandomSource.swift`](QuantumCoinWalletTests/DeterministicSecureRandomSource.swift) |
-| `DeterministicSecureRandomSourceTest.java` | [`DeterministicSecureRandomSourceTests.swift`](QuantumCoinWalletTests/DeterministicSecureRandomSourceTests.swift) |
-| `StrongboxPaddingTest.java` | [`StrongboxPaddingTests.swift`](QuantumCoinWalletTests/StrongboxPaddingTests.swift) |
-| `WalletEntryCodecTest.java` | [`WalletEntryCodecTests.swift`](QuantumCoinWalletTests/WalletEntryCodecTests.swift) |
-| `StrongboxFileCodecScryptValidationTest.java` | [`StrongboxFileCodecScryptValidationTests.swift`](QuantumCoinWalletTests/StrongboxFileCodecScryptValidationTests.swift) |
-| `StrongboxPayloadV3Test.java` | [`StrongboxPayloadV3Tests.swift`](QuantumCoinWalletTests/StrongboxPayloadV3Tests.swift) |
-| `StrongboxPortabilityVectorTest.java` | [`StrongboxPortabilityVectorTests.swift`](QuantumCoinWalletTests/StrongboxPortabilityVectorTests.swift) |
+| `DeterministicSecureRandomSource.java` | [`DeterministicSecureRandomSource.swift`](QuantumSwapWalletTests/DeterministicSecureRandomSource.swift) |
+| `DeterministicSecureRandomSourceTest.java` | [`DeterministicSecureRandomSourceTests.swift`](QuantumSwapWalletTests/DeterministicSecureRandomSourceTests.swift) |
+| `StrongboxPaddingTest.java` | [`StrongboxPaddingTests.swift`](QuantumSwapWalletTests/StrongboxPaddingTests.swift) |
+| `WalletEntryCodecTest.java` | [`WalletEntryCodecTests.swift`](QuantumSwapWalletTests/WalletEntryCodecTests.swift) |
+| `StrongboxFileCodecScryptValidationTest.java` | [`StrongboxFileCodecScryptValidationTests.swift`](QuantumSwapWalletTests/StrongboxFileCodecScryptValidationTests.swift) |
+| `StrongboxPayloadV3Test.java` | [`StrongboxPayloadV3Tests.swift`](QuantumSwapWalletTests/StrongboxPayloadV3Tests.swift) |
+| `StrongboxPortabilityVectorTest.java` | [`StrongboxPortabilityVectorTests.swift`](QuantumSwapWalletTests/StrongboxPortabilityVectorTests.swift) |
 
 Both suites read the same pinned digests (SHA-256 of canonical
 inner JSON, SHA-256 of `WalletEntryCodec` blobs, HMAC tags,
@@ -943,25 +943,33 @@ dependencies**. Every external piece of code ships in either:
 - **Apple frameworks** linked from the iOS SDK
   (`UIKit`, `WebKit`, `CryptoKit`, `Security`, `Foundation`,
   `UniformTypeIdentifiers`), or
-- **A single bundled JavaScript file** (`quantumcoin-bundle.js`,
-  ≈12.3 MiB, MIT-licensed) loaded into a `WKWebView`.
+- **A single bundled JavaScript file** (`quantumswap-bundle.js`,
+  ≈3.2 MiB, MIT-licensed) loaded into a `WKWebView`.
 
 That single file exposes **two** browser globals the bridge
 consumes:
 
 | Global | Purpose | Used in iOS |
 | --- | --- | --- |
-| `QuantumCoinSDK` | Wallet construction, address helpers, JSON-RPC provider, IERC20 contract helper, scrypt KDF, AEAD wallet envelopes | `Resources/bridge.html` (~36 callsites) |
+| `QuantumSwapSDK` | Wallet construction, address helpers, JSON-RPC provider, IERC20 contract helper, scrypt KDF, AEAD wallet envelopes | `Resources/bridge.html` (~36 callsites) |
 | `SeedWordsSDK` | BIP39-style seed-word lookup tables | `Resources/bridge.html` (4 callsites — `getWordListFromSeedArray`, `getAllSeedWords`, `doesSeedWordExist`) |
 
-Both globals are produced upstream from two distinct SDK packages:
+Both globals are produced from the published npm SDK packages
+(same versions as the desktop wallet):
 
-| Upstream SDK | Repository | Role in the bundle |
+| npm package | Version | Role in the bundle |
 | --- | --- | --- |
-| `quantumcoin.js` | <https://github.com/quantumcoinproject/quantumcoin.js> | The ethers.js-compatible wrapper that exposes the high-level `Wallet` / `JsonRpcProvider` / `IERC20` surface this wallet calls (`wallet.sendTransaction`, `token.transfer`, `wallet.getSigningContext`, `wallet.populateTransaction`). |
-| `quantum-coin-js-sdk` | <https://github.com/quantumcoinproject/quantum-coin-js-sdk> | The lower-level Quantum Coin JS SDK (npm: `quantum-coin-js-sdk`) that `quantumcoin.js` builds on. Provides the chain-specific primitives (post-quantum signing, encrypted-wallet JSON envelope, scrypt KDF). |
+| `quantumcoin` | `^8.0.3` | The ethers.js-compatible wrapper that exposes the high-level `Wallet` / `JsonRpcProvider` / `IERC20` surface this wallet calls (`wallet.sendTransaction`, `token.transfer`, `wallet.getSigningContext`, `wallet.populateTransaction`). |
+| `quantumswap` | `^1.0.3` | The DEX surface (`QuantumSwapV2Factory` / `QuantumSwapV2Router` contract helpers) used by the Swap / Liquidity / Pools bridge handlers. |
+| `seed-words` | `^1.1.1` | BIP39-style seed-word lookup tables, exposed as the separate `SeedWordsSDK` global. |
+| `quantum-coin-js-sdk` | `2.1.1` (transitive, pinned exactly by `quantumcoin`) | The lower-level Quantum Coin JS SDK providing chain-specific primitives (post-quantum signing, encrypted-wallet JSON envelope, scrypt KDF) via self-contained WASM + WebCrypto. |
 
-The iOS wallet only ever consumes the **curated `quantumcoin-bundle.js`** —
+Since `quantumcoin` 8.x / `quantumswap` 1.x, cryptography is
+supported natively by the SDKs (WebCrypto randomness/hashing plus
+WASM shipped inside `quantum-coin-js-sdk`), so the bundle carries
+**no polyfills or crypto shims**.
+
+The iOS wallet only ever consumes the **curated `quantumswap-bundle.js`** —
 **no Swift code reaches into either upstream package directly**.
 Adding a new SDK symbol means re-exporting it from the bundle, not
 pulling an upstream package into iOS, so the SHA-256 pin and the
@@ -969,14 +977,15 @@ Android-iOS parity contract stay meaningful.
 
 The bundle is byte-identical to the one shipped by the Android
 wallet's `webview-sdk-bundle`, which is the canonical re-export
-point. The current bundle was built against the following pinned
-npm versions:
+point. The current bundle was built against the following
+lockfile-resolved npm versions:
 
-| npm package | Pinned version |
+| npm package | Resolved version |
 | --- | --- |
-| [`quantumcoin`](https://www.npmjs.com/package/quantumcoin) | `7.0.12` |
-| [`seed-words`](https://www.npmjs.com/package/seed-words) | `^1.0.2` |
-| [`quantum-coin-js-sdk`](https://www.npmjs.com/package/quantum-coin-js-sdk) | `1.0.35` |
+| [`quantumcoin`](https://www.npmjs.com/package/quantumcoin) | `8.0.3` |
+| [`quantumswap`](https://www.npmjs.com/package/quantumswap) | `1.0.3` |
+| [`seed-words`](https://www.npmjs.com/package/seed-words) | `1.1.1` |
+| [`quantum-coin-js-sdk`](https://www.npmjs.com/package/quantum-coin-js-sdk) | `2.1.1` |
 
 ### Native frameworks used
 
@@ -992,7 +1001,7 @@ npm versions:
 ### Build tooling
 
 - **[XcodeGen](https://github.com/yonaskolb/XcodeGen)** ≥ 2.38.0
-  generates `QuantumCoinWallet.xcodeproj` from
+  generates `QuantumSwapWallet.xcodeproj` from
   [`project.yml`](project.yml). The `.xcodeproj` is intentionally
   **not** committed.
 - **`shasum -a 256`** (BSD, ships with macOS) used by
@@ -1034,15 +1043,15 @@ npm versions:
                │
 ┌──────────────▼─────────────────┐  ┌───────────────────────────────┐
 │      JsBridge (Swift)          │◄─┤    bridge.html (WKWebView)    │
-│   JsEngine, JsBridge,          │  │    quantumcoin-bundle.js      │
-│   BundleIntegrity              │  │    (QuantumCoinSDK +          │
+│   JsEngine, JsBridge,          │  │    quantumswap-bundle.js      │
+│   BundleIntegrity              │  │    (QuantumSwapSDK +          │
 └────────────────────────────────┘  │     SeedWordsSDK globals)     │
                                     └───────────────────────────────┘
 ```
 
 The strict layering is enforced by the storage / crypto / bridge
 separation in code review and by invariant tests in
-`QuantumCoinWalletTests/StrongboxLayerTests.swift`. The only
+`QuantumSwapWalletTests/StrongboxLayerTests.swift`. The only
 structurally-permitted writers of wallet-meaningful state are
 the `Strongbox.shared` accessor and the `UnlockCoordinatorV2`
 re-encrypt path; a stray `PrefConnect` write of a wallet field
@@ -1058,10 +1067,10 @@ is caught by a grep-based invariant test.
 ├── project.yml                        XcodeGen project spec
 ├── scripts/
 │   └── embed_bundle_hash.sh           Build-time SHA-256 pin
-└── QuantumCoinWallet/
+└── QuantumSwapWallet/
     ├── AppDelegate.swift              Boot + tamper gate
     ├── Info.plist                     UIFileSharingEnabled = false, etc.
-    ├── QuantumCoinWallet.entitlements
+    ├── QuantumSwapWallet.entitlements
     ├── Assets.xcassets                App icon + brand colors
     ├── LaunchScreen.storyboard
     │
@@ -1081,8 +1090,7 @@ is caught by a grep-based invariant test.
     ├── Notifications/                 BalanceChangeNotifier (background balance pings)
     ├── Resources/
     │   ├── bridge.html                JS bridge (the only HTML the WKWebView loads)
-    │   ├── quantumcoin-bundle.js      The single JS SDK bundle (SHA-256 pinned)
-    │   ├── quantumcoin-bundle.js.LICENSE.txt
+    │   ├── quantumswap-bundle.js      The single JS SDK bundle (SHA-256 pinned)
     │   ├── blockchain_networks.json   Bundled MAINNET network seed
     │   └── en_us.json                 230+ localization keys
     ├── Schema/                        StrongboxFileCodec (v=3 portable), StrongboxPadding
@@ -1094,10 +1102,10 @@ is caught by a grep-based invariant test.
     ├── Theme/                         Color tokens, typography
     ├── UX/                            SnapshotRedactor, Pasteboard
     └── Utilities/                     Constants, helpers
-└── QuantumCoinWalletTests/            v=3 strongbox parity + bridge + UX suites
+└── QuantumSwapWalletTests/            v=3 strongbox parity + bridge + UX suites
 ```
 
-The bundled `quantumcoin-bundle.js` is currently ~12 MiB and the
+The bundled `quantumswap-bundle.js` is currently ~3.2 MiB and the
 `en_us.json` catalog carries 230+ keys. Hard counts (source
 files, tests, lines of HTML) drift quickly with each port from
 the Android-parity reference and are intentionally not pinned in
@@ -1119,14 +1127,14 @@ this README.
 git clone https://github.com/quantumcoinproject/quantum-coin-wallet-ios.git
 cd quantum-coin-wallet-ios
 xcodegen generate
-open QuantumCoinWallet.xcodeproj
+open QuantumSwapWallet.xcodeproj
 ```
 
-Pick the **QuantumCoinWallet** scheme and a destination
+Pick the **QuantumSwapWallet** scheme and a destination
 (simulator or physical device). The first build runs the
 `embed_bundle_hash.sh` pre-build script, which writes
-`QuantumCoinWallet/Generated/BundleHash_Generated.swift` so the
-SHA-256 of `quantumcoin-bundle.js` is embedded in the Swift
+`QuantumSwapWallet/Generated/BundleHash_Generated.swift` so the
+SHA-256 of `quantumswap-bundle.js` is embedded in the Swift
 binary. **The generated file is gitignored** — every build
 regenerates it, so an out-of-date hash is impossible by
 construction.
@@ -1136,18 +1144,18 @@ construction.
 ```bash
 xcodegen generate
 xcodebuild \
-  -project QuantumCoinWallet.xcodeproj \
-  -scheme QuantumCoinWallet \
+  -project QuantumSwapWallet.xcodeproj \
+  -scheme QuantumSwapWallet \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
   -configuration Debug build
 ```
 
 ### Updating the JS bundle
 
-`quantumcoin-bundle.js` is built upstream by the Android wallet's
-[`webview-sdk-bundle/`](https://github.com/quantumcoinproject/quantum-coin-wallet-android/tree/main/webview-sdk-bundle).
+`quantumswap-bundle.js` is built upstream by the Android wallet's
+[`webview-sdk-bundle/`](https://github.com/quantumcoinproject/quantumswap-wallet-android/tree/main/webview-sdk-bundle).
 Drop the new bundle into
-`QuantumCoinWallet/Resources/quantumcoin-bundle.js`; the next
+`QuantumSwapWallet/Resources/quantumswap-bundle.js`; the next
 build regenerates `BundleHash_Generated.swift` automatically.
 
 ---
@@ -1156,14 +1164,14 @@ build regenerates `BundleHash_Generated.swift` automatically.
 
 ```bash
 xcodebuild \
-  -project QuantumCoinWallet.xcodeproj \
-  -scheme QuantumCoinWallet \
+  -project QuantumSwapWallet.xcodeproj \
+  -scheme QuantumSwapWallet \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
   test
 ```
 
 The test target lives in
-[`QuantumCoinWalletTests/`](QuantumCoinWalletTests). It contains
+[`QuantumSwapWalletTests/`](QuantumSwapWalletTests). It contains
 the following suites, all ported one-for-one from the Android
 strongbox + bridge test suites where applicable:
 
@@ -1241,9 +1249,9 @@ their own.
 
 [MIT](LICENSE) — see the file for details.
 
-The bundled `quantumcoin-bundle.js` and its embedded
-third-party libraries are MIT-licensed (see
-[`QuantumCoinWallet/Resources/quantumcoin-bundle.js.LICENSE.txt`](QuantumCoinWallet/Resources/quantumcoin-bundle.js.LICENSE.txt)).
+The bundled `quantumswap-bundle.js` and the npm packages embedded
+in it (`quantumcoin`, `quantumswap`, `seed-words`,
+`quantum-coin-js-sdk`) are MIT-licensed.
 
 ---
 
@@ -1258,7 +1266,7 @@ third-party libraries are MIT-licensed (see
 - **Quantum Coin Go node (open source):**
   <https://github.com/quantumcoinproject/quantum-coin-go>
 - **Android wallet (parity reference):**
-  <https://github.com/quantumcoinproject/quantum-coin-wallet-android>
+  <https://github.com/quantumcoinproject/quantumswap-wallet-android>
 - **`quantumcoin.js` (ethers.js-compatible wrapper SDK):**
   <https://github.com/quantumcoinproject/quantumcoin.js>
 - **`quantum-coin-js-sdk` (lower-level upstream SDK, npm package):**
