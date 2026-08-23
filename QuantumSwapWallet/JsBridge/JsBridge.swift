@@ -345,9 +345,7 @@ public final class JsBridge: @unchecked Sendable {
         "swapCheckPairExists",
         "swapGetAmountsOut",
         "swapGetAmountsIn",
-        "swapEstimateGas",
         "swapCheckAllowance",
-        "swapEstimateApproveGas",
         "swapSubmitApproval",
         "swapSubmitSwap",
         "liquidityListPools",
@@ -357,8 +355,15 @@ public final class JsBridge: @unchecked Sendable {
         "liquiditySubmitApprove",
         "liquiditySubmitAdd",
         "liquiditySubmitRemove",
-        "poolsSubmitCreatePair"
+        "poolsSubmitCreatePair",
+        "tokensSubmitCreate",
+        "dexEstimateGas"
     ]
+
+    /// Test seam for the allowlist (JsBridgeContractTests).
+    static func isAllowlistedDexMethod(_ method: String) -> Bool {
+        dexMethods.contains(method)
+    }
 
     /// DEX submit methods that run post-quantum signing inside the
     /// JS bundle; use the 120s signing settle budget (reads stay at
@@ -369,7 +374,8 @@ public final class JsBridge: @unchecked Sendable {
         "liquiditySubmitApprove",
         "liquiditySubmitAdd",
         "liquiditySubmitRemove",
-        "poolsSubmitCreatePair"
+        "poolsSubmitCreatePair",
+        "tokensSubmitCreate"
     ]
 
     /// Stage `payload` and invoke an allowlisted DEX bridge method

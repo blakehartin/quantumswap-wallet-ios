@@ -33,7 +33,8 @@ public final class HomeViewController: UIViewController {
     private let centerStripView = CenterStripView()
     private let containerView = UIView()
     private let offlineOverlayView = OfflineOverlayView()
-    private let bottomNavView = BottomNavView()
+    private let ambientView = AmbientBackgroundView()
+    private let drawerView = DrawerView()
 
     // MARK: - Child
 
@@ -103,11 +104,15 @@ public final class HomeViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
 
-        [topBannerView, centerStripView,
-            containerView, offlineOverlayView, bottomNavView].forEach {
+        // Desktop body ambient (violet / cyan orbs) under everything; the
+        // wallet card is added AFTER the banner so it paints on top of the
+        // band it overlaps; the drawer sits above all of it.
+        [ambientView, topBannerView, containerView, centerStripView,
+            offlineOverlayView, drawerView].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview($0)
         }
+        topBannerView.onBurgerTap = { [weak self] in self?.drawerView.open() }
 
         // The network chip lives in the banner's top-right corner now
         // (mirroring Android `imageButton_home_network`). Style and
@@ -117,7 +122,7 @@ public final class HomeViewController: UIViewController {
         networkChipButton.addTarget(self, action: #selector(openNetworkPicker), for: .touchUpInside)
         topBannerView.setNetworkChipView(networkChipButton)
 
-        bottomNavView.onSelect = { [weak self] tab in self?.handleBottomNavTap(tab) }
+        drawerView.onSelect = { [weak self] item in self?.handleDrawerSelect(item) }
         centerStripView.onSend = { [weak self] in self?.presentSendFlow() }
         centerStripView.onReceive = { [weak self] in self?.presentReceive() }
         centerStripView.onTransactions = { [weak self] in self?.presentTransactions() }
@@ -141,6 +146,16 @@ public final class HomeViewController: UIViewController {
                 // `viewDidLayoutSubviews` keeps the banner's *bottom* edge
                 // invariant in screen space, so the centre wallet strip
                 // and inner-fragment containers do not shift.
+                ambientView.topAnchor.constraint(equalTo: view.topAnchor),
+                ambientView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                ambientView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                ambientView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+
+                drawerView.topAnchor.constraint(equalTo: view.topAnchor),
+                drawerView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                drawerView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                drawerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+
                 topBannerView.topAnchor.constraint(equalTo: view.topAnchor),
                 topBannerView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                 topBannerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -150,7 +165,8 @@ public final class HomeViewController: UIViewController {
                 // below the banner with only a tiny 4pt gap, matching
                 // Android `home_activity.xml` where `linearLayout_home_top`
                 // butts directly against the banner.
-                centerStripView.topAnchor.constraint(equalTo: topBannerView.bottomAnchor, constant: 4),
+                // Android: the wallet card overlaps the band by 56pt.
+                centerStripView.topAnchor.constraint(equalTo: topBannerView.bottomAnchor, constant: -56),
                 centerStripView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
                 centerStripView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
 
@@ -162,9 +178,6 @@ public final class HomeViewController: UIViewController {
                 offlineOverlayView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
                 offlineOverlayView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
 
-                bottomNavView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-                bottomNavView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                bottomNavView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor)
             ])
 
         // Seed the swappable container anchors with `.mainHome` defaults.
@@ -172,7 +185,7 @@ public final class HomeViewController: UIViewController {
         containerTopConstraint = containerView.topAnchor.constraint(
             equalTo: centerStripView.bottomAnchor, constant: 4)
         containerBottomConstraint = containerView.bottomAnchor.constraint(
-            equalTo: bottomNavView.topAnchor)
+            equalTo: view.safeAreaLayoutGuide.bottomAnchor)
         containerTopConstraint?.isActive = true
         containerBottomConstraint?.isActive = true
 
@@ -322,28 +335,9 @@ public final class HomeViewController: UIViewController {
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        // Banner height = 30% of screen width on first launch
-        // (`HomeActivity.screenViewType(-1)`); other states use the
-        // wrap-content baseline (logo 50pt + title + padding ~ 80pt).
-        let target: CGFloat
-        switch currentScreenViewType {
-            case .onboarding:
-            target = view.bounds.width * 0.30
-            case .mainHome, .innerFragment:
-            // 96pt (was 80) so the centered "QuantumSwap" title has
-            // breathing room below it on the main wallet screen,
-            // matching Android `home_activity.xml` `imageView_home_logo`
-            // + `textView_home_tile` block which lays out at ~96dp tall.
-            target = 96
-        }
-        // `safeAreaInsets.top` is 0 in landscape / iPad split-view, ~20pt
-        // on a status-bar-only phone (iPhone SE), and ~47-59pt on notch /
-        // Dynamic-Island devices. Adding it here keeps the banner's
-        // bottom-edge fixed (so the centre strip / inner-fragment
-        // container does not shift) while letting the gradient fill the
-        // strip beside the camera cut-out.
-        let extra = max(0, view.safeAreaInsets.top)
-        topBannerView.setHeight(target + extra)
+        // Android setBandBottomPadding: 68 (home, the wallet card overlaps
+        // the band by 56) / 12 (sub-screens, onboarding).
+        topBannerView.setBandBottomPadding(currentScreenViewType == .mainHome ? 68 : 12)
     }
 
     public override func viewSafeAreaInsetsDidChange() {
@@ -597,17 +591,17 @@ public final class HomeViewController: UIViewController {
             networkChipButton.isHidden = false
             centerStripView.isHidden = false
             centerStripView.refreshBalanceLoadingAppearanceIfNeeded()
-            bottomNavView.isHidden = false
+            topBannerView.setBurgerHidden(false)
             case .onboarding:
             topBannerView.isHidden = false
             networkChipButton.isHidden = true
             centerStripView.isHidden = true
-            bottomNavView.isHidden = true
+            topBannerView.setBurgerHidden(true)
             case .innerFragment:
             topBannerView.isHidden = false
             networkChipButton.isHidden = true
             centerStripView.isHidden = true
-            bottomNavView.isHidden = false
+            topBannerView.setBurgerHidden(false)
         }
 
         // Layout collapse - rebind container's top/bottom so hidden views
@@ -627,13 +621,7 @@ public final class HomeViewController: UIViewController {
             topConstant = 8
         }
 
-        let bottomAnchorView: NSLayoutYAxisAnchor
-        switch type {
-            case .mainHome, .innerFragment:
-            bottomAnchorView = bottomNavView.topAnchor
-            case .onboarding:
-            bottomAnchorView = view.safeAreaLayoutGuide.bottomAnchor
-        }
+        let bottomAnchorView = view.safeAreaLayoutGuide.bottomAnchor
 
         containerTopConstraint = containerView.topAnchor.constraint(
             equalTo: topAnchorView, constant: topConstant)
@@ -670,19 +658,19 @@ public final class HomeViewController: UIViewController {
         present(BlockchainNetworkSelectDialogViewController(), animated: true)
     }
 
-    private func handleBottomNavTap(_ tab: BottomNavView.Tab) {
-        switch tab {
+    /// Desktop burger menu (Android drawer rows).
+    private func handleDrawerSelect(_ item: DrawerView.Item) {
+        switch item {
             case .wallets:
             lastSelectedTab = .wallets
             beginTransactionNow(WalletsViewController()); apply(.innerFragment)
             case .settings:
-            // Capture the current primary tab so `popFromSettings`
-            // knows where back should land, then route into Settings.
             lastTabBeforeSettings = lastSelectedTab
             beginTransactionNow(SettingsViewController()); apply(.innerFragment)
+            case .advanced:
+            beginTransactionNow(AdvancedViewController()); apply(.innerFragment)
         }
     }
-
     /// Called by `SettingsViewController`'s back arrow. Returns the
     /// user to whichever primary tab they were on the instant they
     /// entered Settings (`.main` -> `showMain`, `.wallets` ->
@@ -834,6 +822,9 @@ public final class HomeViewController: UIViewController {
                       fetchAddress == self.centerStripView.currentAddress else { return }
                 let formatted = CoinUtils.formatWei(resp.result?.balance)
                 self.centerStripView.setBalance(formatted)
+                // Native-balance cache read by the token picker's "Q" row
+                // (Android GlobalMethods.CURRENT_WALLET_BALANCE_FORMATTED).
+                NativeBalanceCache.store(address: fetchAddress, formatted: formatted)
                 BalanceChangeNotifier.shared.observeBalance(
                     formatted, address: fetchAddress)
             } catch {
@@ -949,8 +940,8 @@ public final class HomeViewController: UIViewController {
             cfg.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(
                 pointSize: 10, weight: .regular)
             cfg.contentInsets = NSDirectionalEdgeInsets(
-                top: 4, leading: 8, bottom: 4, trailing: 8)
-            cfg.baseForegroundColor = chipColor
+                top: 6, leading: 10, bottom: 6, trailing: 10)
+            cfg.baseForegroundColor = UIColor(argbHex: 0xD9FFFFFF)
             networkChipButton.configuration = cfg
         } else {
             networkChipButton.setImage(
@@ -961,10 +952,11 @@ public final class HomeViewController: UIViewController {
             networkChipButton.tintColor = chipColor
             networkChipButton.setTitleColor(chipColor, for: .normal)
         }
-        networkChipButton.titleLabel?.font = Typography.body(12)
+        networkChipButton.titleLabel?.font = Typography.boldTitle(12)
+        networkChipButton.backgroundColor = UIColor(argbHex: 0xD908080E)
         networkChipButton.layer.borderWidth = 1
-        networkChipButton.layer.borderColor = chipColor.withAlphaComponent(0.6).cgColor
-        networkChipButton.layer.cornerRadius = 4
+        networkChipButton.layer.borderColor = UIColor(argbHex: 0x21FFFFFF).cgColor
+        networkChipButton.layer.cornerRadius = 10
         networkChipButton.layer.masksToBounds = true
     }
 

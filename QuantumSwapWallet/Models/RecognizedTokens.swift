@@ -85,18 +85,52 @@ enum RecognizedTokens {
     /// classified as Unrecognized.
     static let y2q = "0xa8036870874fbed790ed4d3bbd41b2f390b9858ff021f2993e90c6d1cbb167c7"
 
+    /// Lion (Lio).
+    static let lion = "0x4015b40b181f2415003f24118b215ce04f276509176eccb10e0c4a9ccbd458d2"
+
+    /// Tiger (tig).
+    static let tiger = "0x6ff70c260458c9f448ec7aab008f1611456d58edb12e7795bf88735e1986a6ad"
+
+    /// Cat (cat).
+    static let cat = "0x592a8abb1de07bc3797bc3c592fc74c099c5a311ba856fc66fb6d4cfc18c728d"
+
+    /// panther (pant).
+    static let panther = "0x05fe2265b69d0c70a24075180242736c7389876b8917f38400e6540519e663df"
+
+    /// Wrapped Q (WQ, Beta2 release).
+    static let wrappedQ = "0x45bd01be5ef8509d9da183689ea7faf647331c54c7c9801de54c9ede9ac44d92"
+
     /// Lower-cased set of all recognized contract addresses;
     /// computed once at type-init time so each `isRecognized`
     /// call is a single Set lookup. New entries here MUST be
     /// added in lower-case form (or wrapped in `.lowercased()`)
-    /// so the membership test stays case-insensitive.
-    static let all: Set<String> = [heisen.lowercased(), y2q.lowercased()]
+    /// so the membership test stays case-insensitive. Mirrors
+    /// desktop src/lib/tokenfilter.ts RECOGNIZED_TOKEN_ADDRESSES
+    /// (7 entries) and Android RecognizedTokens.java.
+    static let all: Set<String> = [heisen.lowercased(), y2q.lowercased(),
+                                   lion.lowercased(), tiger.lowercased(),
+                                   cat.lowercased(), panther.lowercased(),
+                                   wrappedQ.lowercased()]
 
     /// `true` iff the given contract address is in the recognized
     /// allow-list. `nil` and empty inputs return `false` (native
     /// coin sends carry `nil` contract; the native coin row is
     /// surfaced via a separate "QC native" affordance, NOT
     /// through this allow-list).
+    /// Display order used by the swap "To" picker when the account
+    /// holds none of them (Android RecognizedTokens.LISTED).
+    static let listed: [(address: String, symbol: String)] = [
+        (heisen, "HSN"), (y2q, "Y2Q"), (lion, "Lio"), (tiger, "tig"),
+        (cat, "cat"), (panther, "pant"), (wrappedQ, "WQ")
+    ]
+
+    /// Wallet-vouched ticker for an allow-listed contract (display
+    /// only; amount math always uses bridge-resolved decimals).
+    static func displaySymbol(_ contract: String?) -> String? {
+        guard let c = contract?.lowercased() else { return nil }
+        return listed.first { $0.address.lowercased() == c }?.symbol
+    }
+
     static func isRecognized(_ contract: String?) -> Bool {
         guard let raw = contract, !raw.isEmpty else { return false }
         return all.contains(raw.lowercased())

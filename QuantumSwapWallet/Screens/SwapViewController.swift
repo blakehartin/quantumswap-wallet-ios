@@ -1,6 +1,15 @@
 // SwapViewController.swift
-// Port of Android `SwapFragment.java`: quote via swapGetAmountsOut,
-// execute approve + swap through the pull-model DEX bridge.
+// Desktop swap form (src/app/swap.ts) / Android `SwapFragment.java`:
+//   - two token pickers (no Q preselect; the "To" picker always lists
+//     the recognized allow-list);
+//   - From / To boxes (balance row + editable amount) and the flip
+//     button appear only once BOTH tokens are selected;
+//   - bidirectional quote with a 400 ms debounce (swapGetAmountsOut /
+//     swapGetAmountsIn); tapping a balance fills that side;
+//   - route line "Route: A > B > C";
+//   - Next -> allowance check -> tx-steps dialog [Approve FROM]? [Swap
+//     FROM -> TO] with per-step gas estimate, review (+ "i agree" ->
+//     unlock) and scan-API confirmation.
 
 import UIKit
 
@@ -8,26 +17,29 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
 
     public var screenViewType: ScreenViewType { .innerFragment }
 
-    private static let approvalPollMax = 24
-    private static let approvalPollIntervalNs: UInt64 = 5_000_000_000
+    private static let quoteDebounceMs: UInt64 = 400
 
     private var walletAddress = ""
     private var fromPicker: DexTokenPickerView!
     private var toPicker: DexTokenPickerView!
-    private let amountInField = DexScreenChrome.makeField(
-        placeholder: "", keyboard: .decimalPad)
-    private let slippageField = DexScreenChrome.makeField(
-        placeholder: "1", keyboard: .decimalPad)
-    private let amountOutLabel = UILabel()
+    private let fromBox = UIStackView()
+    private let toBox = UIStackView()
+    private let flipRow = UIStackView()
+    private let fromBalanceButton = UIButton(type: .system)
+    private let toBalanceButton = UIButton(type: .system)
+    private let amountInField = DexScreenChrome.makeField(placeholder: "", keyboard: .decimalPad)
+    private let amountOutField = DexScreenChrome.makeField(placeholder: "", keyboard: .decimalPad)
+    private let slippageField = DexScreenChrome.makeField(placeholder: "1", keyboard: .decimalPad)
     private let routeLabel = UILabel()
     private let statusLabel = UILabel()
-    private let quoteButton = GreenPillButton(type: .system)
-    private let swapButton = GreenPillButton(type: .system)
+    private let nextButton = GreenPillButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .medium)
 
     private var lastQuotedAmountOut: String?
     private var flowInFlight = false
-    private var didShowEarlyWarn = false
+    private var syncingAmounts = false
+    private var quoteTask: Task<Void, Never>?
+    private var stepsDialog: TxStepsDialogViewController?
 
     public override func viewDidLoad() {
         super.viewDidLoad()
@@ -54,21 +66,35 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
         }
 
         let customLabel = L.lang("custom-contract-address", fallback: "Custom...")
-        fromPicker = DexTokenPickerView(customLabel: customLabel)
-        toPicker = DexTokenPickerView(customLabel: customLabel)
-        let clearQuote: () -> Void = { [weak self] in
-            self?.lastQuotedAmountOut = nil
-            self?.amountOutLabel.text = "-"
-            self?.routeLabel.isHidden = true
-        }
-        fromPicker.onChanged = clearQuote
-        toPicker.onChanged = clearQuote
+        fromPicker = DexTokenPickerView(customLabel: customLabel, preselectNative: false,
+                                        alwaysIncludeRecognized: false)
+        toPicker = DexTokenPickerView(customLabel: customLabel, preselectNative: false,
+                                      alwaysIncludeRecognized: true)
+        fromPicker.onChanged = { [weak self] in self?.onTokensChanged() }
+        toPicker.onChanged = { [weak self] in self?.onTokensChanged() }
 
-        amountInField.placeholder = L.lang("swap-from-quantity", fallback: "From quantity")
+        buildBox(fromBox, balanceButton: fromBalanceButton, field: amountInField, fromSide: true)
+        buildBox(toBox, balanceButton: toBalanceButton, field: amountOutField, fromSide: false)
+
+        // Flip button (desktop swap-flip): 40pt oval.
+        let flip = UIButton(type: .custom)
+        flip.setImage(UIImage(systemName: "arrow.up.arrow.down")?.withRenderingMode(.alwaysTemplate), for: .normal)
+        flip.tintColor = .white
+        flip.backgroundColor = UIColor(rgbHex: 0x1C1F2F)
+        flip.layer.cornerRadius = 20
+        flip.layer.borderWidth = 1
+        flip.layer.borderColor = UIColor(argbHex: 0x99917DCF).cgColor
+        flip.widthAnchor.constraint(equalToConstant: 40).isActive = true
+        flip.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        flip.addTarget(self, action: #selector(flipTokens), for: .touchUpInside)
+        flipRow.axis = .horizontal
+        flipRow.alignment = .center
+        flipRow.addArrangedSubview(UIView())
+        flipRow.addArrangedSubview(flip)
+        flipRow.addArrangedSubview(UIView())
+        flipRow.distribution = .equalCentering
+
         slippageField.text = "1"
-        amountOutLabel.text = "-"
-        amountOutLabel.font = Typography.body(16)
-        amountOutLabel.textColor = UIColor(named: "colorCommon6") ?? .label
 
         routeLabel.font = Typography.body(12)
         routeLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
@@ -80,13 +106,12 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
         statusLabel.numberOfLines = 0
         statusLabel.isHidden = true
 
-        quoteButton.setTitle(L.lang("get-quote", fallback: "Get Quote"), for: .normal)
-        quoteButton.addTarget(self, action: #selector(requestQuote), for: .touchUpInside)
-        swapButton.setTitle(L.lang("swap", fallback: "Swap"), for: .normal)
-        swapButton.addTarget(self, action: #selector(startSwap), for: .touchUpInside)
+        nextButton.setTitle(L.lang("next", fallback: "Next"), for: .normal)
+        nextButton.addTarget(self, action: #selector(tapNext), for: .touchUpInside)
         spinner.hidesWhenStopped = true
-
-        let buttonRow = UIStackView(arrangedSubviews: [quoteButton, swapButton, spinner])
+        let footerSpacer = UIView()
+        footerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let buttonRow = UIStackView(arrangedSubviews: [footerSpacer, spinner, nextButton])
         buttonRow.axis = .horizontal
         buttonRow.spacing = 12
         buttonRow.alignment = .center
@@ -95,12 +120,11 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
             backBar, title, DexScreenChrome.makeDivider(), releaseBanner,
             DexScreenChrome.makeLabel(L.lang("swap-from-token", fallback: "From token")),
             fromPicker,
+            fromBox,
+            flipRow,
             DexScreenChrome.makeLabel(L.lang("swap-to-token", fallback: "To token")),
             toPicker,
-            DexScreenChrome.makeLabel(L.lang("swap-from-quantity", fallback: "From quantity")),
-            amountInField,
-            DexScreenChrome.makeLabel(L.lang("swap-to-quantity", fallback: "To quantity")),
-            amountOutLabel,
+            toBox,
             routeLabel,
             DexScreenChrome.makeLabel(L.lang("slippage", fallback: "Slippage")),
             slippageField,
@@ -110,9 +134,11 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
         content.axis = .vertical
         content.spacing = 10
         content.setCustomSpacing(8, after: backBar)
+        content.setCustomSpacing(4, after: flipRow)
 
         let scroll = UIScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.keyboardDismissMode = .interactive
         content.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scroll)
         scroll.addSubview(content)
@@ -120,115 +146,210 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
             scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
             content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 8),
             content.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16),
             content.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
             content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24)
         ])
 
+        onTokensChanged()
         Task { [weak self] in
             guard let self else { return }
-            let tokens = await DexScreenChrome.loadRecognizedTokens(for: self.walletAddress)
+            let tokens = await DexScreenChrome.loadAccountTokens(for: self.walletAddress)
             await MainActor.run {
-                self.fromPicker.setTokens(tokens)
-                self.toPicker.setTokens(tokens)
+                self.fromPicker.setTokens(tokens, walletAddress: self.walletAddress)
+                self.toPicker.setTokens(tokens, walletAddress: self.walletAddress)
             }
         }
-
         view.installPressFeedbackRecursive()
+    }
+
+    private func buildBox(_ box: UIStackView, balanceButton: UIButton, field: UITextField, fromSide: Bool) {
+        let L = Localization.shared
+        let balanceLabel = UILabel()
+        balanceLabel.text = L.getBalanceByLangValues() + ":"
+        balanceLabel.font = Typography.body(12)
+        balanceLabel.textColor = UIColor(named: "colorCommon3") ?? .secondaryLabel
+        balanceButton.setTitle("0", for: .normal)
+        balanceButton.titleLabel?.font = Typography.body(12)
+        balanceButton.setTitleColor(UIColor(named: "colorCommon6") ?? .label, for: .normal)
+        balanceButton.addAction(UIAction { [weak self] _ in self?.fillFromBalance(fromSide: fromSide) },
+                                for: .touchUpInside)
+        let balanceRow = UIStackView(arrangedSubviews: [balanceLabel, balanceButton, UIView()])
+        balanceRow.axis = .horizontal
+        balanceRow.spacing = 6
+        balanceRow.alignment = .center
+        field.placeholder = L.lang(fromSide ? "swap-from-quantity" : "swap-to-quantity",
+                                   fallback: fromSide ? "From quantity" : "To quantity")
+        field.addAction(UIAction { [weak self] _ in self?.amountEdited(fromSide: fromSide) }, for: .editingChanged)
+        box.axis = .vertical
+        box.spacing = 6
+        box.addArrangedSubview(balanceRow)
+        box.addArrangedSubview(field)
+        box.isHidden = true
     }
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        guard !didShowEarlyWarn else { return }
-        didShowEarlyWarn = true
+        // Desktop: early-phase warning on every screen open.
         let L = Localization.shared
-        let warn = ConfirmDialogViewController(
-            title: L.lang("swap", fallback: "Swap"),
-            message: L.lang("swapEarlyPhaseWarn",
-                fallback: "This is a feature still in early phases of testing. Do you want to continue?"))
-        warn.onCancel = { [weak self] in
-            (self?.parent as? HomeViewController)?.showMain()
-        }
+        let warn = YesNoDialogViewController(message: L.lang("swapEarlyPhaseWarn",
+            fallback: "This is a feature still in early phases of testing. Do you want to continue?"))
+        warn.onNo = { [weak self] in self?.tapBack() }
         present(warn, animated: true)
+    }
+
+    public override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        quoteTask?.cancel()
+        stepsDialog?.dismissSteps()
+        stepsDialog = nil
     }
 
     @objc private func tapBack() {
         (parent as? HomeViewController)?.showMain()
     }
 
-    // MARK: - Quote
+    // MARK: - Token / amount changes (desktop updateSwapScreenInfo)
 
-    @objc private func requestQuote() {
-        let amountIn = text(amountInField)
-        guard validateInputs(amountIn) else { return }
+    private func onTokensChanged() {
+        quoteTask?.cancel()
+        lastQuotedAmountOut = nil
+        setAmountSilently(amountInField, "")
+        setAmountSilently(amountOutField, "")
+        routeLabel.isHidden = true
+        updateBalances()
+        let ready = !fromPicker.isEmpty && !toPicker.isEmpty
+        fromBox.isHidden = !ready
+        toBox.isHidden = !ready
+        flipRow.isHidden = !ready
+        guard ready, fromPicker.tokenValue().caseInsensitiveCompare(toPicker.tokenValue()) != .orderedSame else { return }
         setBusy(true)
         Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.resolveMeta(self.fromPicker)
-                try await self.resolveMeta(self.toPicker)
-                try await self.doQuote(amountIn: amountIn)
+                try await DexScreenChrome.resolveMeta(self.fromPicker, walletAddress: self.walletAddress)
+                try await DexScreenChrome.resolveMeta(self.toPicker, walletAddress: self.walletAddress)
+                try await self.fetchRoute(alertWhenMissing: true)
             } catch {
                 await MainActor.run { self.failFlow("\(error)") }
             }
         }
     }
 
-    private func resolveMeta(_ picker: DexTokenPickerView) async throws {
-        guard picker.needsMetadata() else { return }
-        let addr = picker.tokenValue()
-        var payload = DexPayloads.base()
-        payload["contractAddress"] = addr
-        payload["ownerAddress"] = walletAddress
-        let json = try await JsBridge.shared.dexCallAsync(
-            method: "swapGetTokenMetadata", payload: payload)
-        let data = try DexBridgeResult.unwrapData(json)
-        let symbol = (data["symbol"] as? String) ?? ""
-        let decimals = (data["decimals"] as? Int)
-            ?? (data["decimals"] as? NSNumber)?.intValue ?? 18
-        let contract = (data["contractAddress"] as? String) ?? addr
-        await MainActor.run {
-            picker.setResolvedMeta(address: contract, symbol: symbol, decimals: decimals)
+    private func updateBalances() {
+        fromBalanceButton.setTitle(fromPicker.balanceText(), for: .normal)
+        toBalanceButton.setTitle(toPicker.balanceText(), for: .normal)
+    }
+
+    private func fillFromBalance(fromSide: Bool) {
+        let picker = fromSide ? fromPicker! : toPicker!
+        let field = fromSide ? amountInField : amountOutField
+        let v = picker.balanceText()
+        guard v != "0", !v.isEmpty else { return }
+        field.text = v
+        amountEdited(fromSide: fromSide)
+    }
+
+    @objc private func flipTokens() {
+        let a = fromPicker.captureSelection()
+        let b = toPicker.captureSelection()
+        let oldOut = text(amountOutField)
+        quoteTask?.cancel()
+        fromPicker.restoreSelection(b)
+        toPicker.restoreSelection(a)
+        onTokensChanged()
+        if !oldOut.isEmpty {
+            setAmountSilently(amountInField, oldOut)
+            scheduleQuote(fromChanged: true)
         }
     }
 
-    private func doQuote(amountIn: String) async throws {
-        var payload = DexPayloads.base()
-        payload["fromTokenValue"] = fromPicker.tokenValue()
-        payload["toTokenValue"] = toPicker.tokenValue()
-        payload["fromDecimals"] = fromPicker.decimals()
-        payload["toDecimals"] = toPicker.decimals()
-        payload["amountIn"] = amountIn
-        let json = try await JsBridge.shared.dexCallAsync(
-            method: "swapGetAmountsOut", payload: payload)
-        let data = try DexBridgeResult.unwrapData(json)
-        let out = (data["amountOut"] as? String) ?? ""
-        await MainActor.run {
-            self.lastQuotedAmountOut = out
-            self.amountOutLabel.text = out.isEmpty ? "-" : out
-        }
-        try await fetchRoute()
+    private func setAmountSilently(_ field: UITextField, _ value: String) {
+        syncingAmounts = true
+        field.text = value
+        syncingAmounts = false
     }
 
-    private func fetchRoute() async throws {
+    private func amountEdited(fromSide: Bool) {
+        guard !syncingAmounts else { return }
+        scheduleQuote(fromChanged: fromSide)
+    }
+
+    // MARK: - Quote (bidirectional, 400 ms debounce)
+
+    private func scheduleQuote(fromChanged: Bool) {
+        quoteTask?.cancel()
+        quoteTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: SwapViewController.quoteDebounceMs * 1_000_000)
+            guard !Task.isCancelled, let self else { return }
+            await self.runQuote(fromChanged: fromChanged)
+        }
+    }
+
+    private func runQuote(fromChanged: Bool) async {
+        guard !fromPicker.isEmpty, !toPicker.isEmpty,
+              fromPicker.tokenValue().caseInsensitiveCompare(toPicker.tokenValue()) != .orderedSame else { return }
+        let source = text(fromChanged ? amountInField : amountOutField)
+        let target = fromChanged ? amountOutField : amountInField
+        guard Self.isPositiveAmount(source) else {
+            setAmountSilently(target, "")
+            lastQuotedAmountOut = nil
+            return
+        }
+        setBusy(true)
+        do {
+            try await DexScreenChrome.resolveMeta(fromPicker, walletAddress: walletAddress)
+            try await DexScreenChrome.resolveMeta(toPicker, walletAddress: walletAddress)
+            var payload = DexPayloads.base()
+            payload["fromTokenValue"] = fromPicker.tokenValue()
+            payload["toTokenValue"] = toPicker.tokenValue()
+            payload["fromDecimals"] = fromPicker.decimals()
+            payload["toDecimals"] = toPicker.decimals()
+            if fromChanged {
+                payload["amountIn"] = source
+                let json = try await JsBridge.shared.dexCallAsync(method: "swapGetAmountsOut", payload: payload)
+                let data = try DexBridgeResult.unwrapData(json)
+                let out = (data["amountOut"] as? String) ?? ""
+                guard !Task.isCancelled else { return }
+                lastQuotedAmountOut = out
+                setAmountSilently(amountOutField, out)
+            } else {
+                payload["amountOut"] = source
+                let json = try await JsBridge.shared.dexCallAsync(method: "swapGetAmountsIn", payload: payload)
+                let data = try DexBridgeResult.unwrapData(json)
+                let input = (data["amountIn"] as? String) ?? ""
+                guard !Task.isCancelled else { return }
+                lastQuotedAmountOut = source
+                setAmountSilently(amountInField, input)
+            }
+            setBusy(false)
+        } catch {
+            failFlow("\(error)")
+        }
+    }
+
+    private func fetchRoute(alertWhenMissing: Bool) async throws {
         var payload = DexPayloads.base()
         payload["fromTokenValue"] = fromPicker.tokenValue()
         payload["toTokenValue"] = toPicker.tokenValue()
-        let json = try await JsBridge.shared.dexCallAsync(
-            method: "swapCheckPairExists", payload: payload)
+        let json = try await JsBridge.shared.dexCallAsync(method: "swapCheckPairExists", payload: payload)
         let data = try DexBridgeResult.unwrapData(json)
         let exists = (data["exists"] as? Bool) ?? false
         let path = data["path"] as? [Any]
         let symbols = data["pathSymbols"] as? [Any]
         await MainActor.run {
             self.setBusy(false)
+            let L = Localization.shared
             guard exists, let path, !path.isEmpty else {
                 self.routeLabel.isHidden = true
+                if alertWhenMissing {
+                    DexScreenChrome.presentError(from: self, message: L.lang("swap-no-pair",
+                        fallback: "No swap route exists between these two tokens (max 3 hops)"))
+                }
                 return
             }
-            let L = Localization.shared
             var parts: [String] = []
             for i in 0..<path.count {
                 let sym = (symbols?[safe: i] as? String)
@@ -239,236 +360,144 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
                     parts.append(DexBridgeResult.shortAddr(addr))
                 }
             }
-            self.routeLabel.text = L.lang("swap-route", fallback: "Route")
-                + ": " + parts.joined(separator: " > ")
+            self.routeLabel.text = L.lang("swap-route", fallback: "Route") + ": " + parts.joined(separator: " > ")
             self.routeLabel.isHidden = false
         }
     }
 
-    // MARK: - Swap execute
+    // MARK: - Next -> allowance check -> steps
 
-    @objc private func startSwap() {
-        let L = Localization.shared
+    /// Desktop onSwapNextClick: post-click validation (the button is
+    /// never disabled), then the allowance check decides the plan.
+    @objc private func tapNext() {
         let amountIn = text(amountInField)
         guard validateInputs(amountIn) else { return }
         if lastQuotedAmountOut == nil || lastQuotedAmountOut?.isEmpty == true {
-            requestQuote()
-            return
+            lastQuotedAmountOut = text(amountOutField)
         }
         if flowInFlight { return }
-
-        let message = L.lang("swap-execute-confirm-message",
-            fallback: "You are swapping [FROM_AMOUNT] [FROM_SYMBOL] for at least [TO_AMOUNT] [TO_SYMBOL].")
-            .replacingOccurrences(of: "[FROM_AMOUNT]", with: amountIn)
-            .replacingOccurrences(of: "[FROM_SYMBOL]",
-                with: DexBridgeResult.sanitizeSymbol(fromPicker.symbol()))
-            .replacingOccurrences(of: "[TO_AMOUNT]", with: minOutForDisplay())
-            .replacingOccurrences(of: "[TO_SYMBOL]",
-                with: DexBridgeResult.sanitizeSymbol(toPicker.symbol()))
-
-        let confirm = ConfirmDialogViewController(
-            title: L.lang("swap", fallback: "Swap"), message: message)
-        confirm.onConfirm = { [weak self] in
-            guard let self else { return }
-            DexUnlockPrompt.show(from: self) { [weak self] _ in
-                self?.runSwapFlow()
-            }
-        }
-        present(confirm, animated: true)
-    }
-
-    private func runSwapFlow() {
-        flowInFlight = true
         setBusy(true)
-        let address = walletAddress
         Task { [weak self] in
             guard let self else { return }
             do {
-                let loaded = try DexUnlockPrompt.loadWalletKeys(walletAddress: address)
-                var priv = loaded.0
-                var pub = loaded.1
-                defer {
-                    priv.resetBytes(in: 0..<priv.count)
-                    pub.resetBytes(in: 0..<pub.count)
+                try await DexScreenChrome.resolveMeta(self.fromPicker, walletAddress: self.walletAddress)
+                try await DexScreenChrome.resolveMeta(self.toPicker, walletAddress: self.walletAddress)
+                var payload = DexPayloads.base()
+                payload["fromTokenValue"] = self.fromPicker.tokenValue()
+                payload["fromDecimals"] = self.fromPicker.decimals()
+                payload["requiredAmount"] = amountIn
+                payload["ownerAddress"] = self.walletAddress
+                let json = try await JsBridge.shared.dexCallAsync(method: "swapCheckAllowance", payload: payload)
+                let data = try DexBridgeResult.unwrapData(json)
+                let sufficient = (data["sufficient"] as? Bool) ?? false
+                await MainActor.run {
+                    self.setBusy(false)
+                    self.showStepsDialog(needsApproval: !sufficient)
                 }
-                try await self.checkAllowanceThen(priv: priv, pub: pub)
             } catch {
                 await MainActor.run { self.failFlow("\(error)") }
             }
         }
     }
 
-    private func checkAllowanceThen(priv: Data, pub: Data) async throws {
-        var payload = DexPayloads.base()
-        payload["fromTokenValue"] = fromPicker.tokenValue()
-        payload["fromDecimals"] = fromPicker.decimals()
-        payload["requiredAmount"] = text(amountInField)
-        payload["ownerAddress"] = walletAddress
-        let json = try await JsBridge.shared.dexCallAsync(
-            method: "swapCheckAllowance", payload: payload)
-        let data = try DexBridgeResult.unwrapData(json)
-        let sufficient = (data["sufficient"] as? Bool) ?? false
-        if sufficient {
-            try await estimateAndSubmitSwap(priv: priv, pub: pub)
-        } else {
-            try await confirmApproval(priv: priv, pub: pub)
-        }
-    }
-
-    private func confirmApproval(priv: Data, pub: Data) async throws {
+    /// Desktop createSwapWorkflowStepPlan: optional "Approve FROM",
+    /// always "Swap FROM -> TO".
+    private func showStepsDialog(needsApproval: Bool) {
         let L = Localization.shared
-        let message = L.lang("swap-approval-confirm-message",
-            fallback: "You are approving [QUANTITY] tokens for use in QuantumSwap.")
-            .replacingOccurrences(of: "[QUANTITY]", with: text(amountInField))
-        let approved: Bool = await withCheckedContinuation { cont in
-            Task { @MainActor in
-                let dlg = ConfirmDialogViewController(
-                    title: L.lang("approve", fallback: "Approve"), message: message)
-                dlg.onConfirm = { cont.resume(returning: true) }
-                dlg.onCancel = { cont.resume(returning: false) }
-                self.present(dlg, animated: true)
-            }
-        }
-        if !approved {
-            await MainActor.run { self.failFlow(nil) }
-            return
-        }
-        try await submitApproval(priv: priv, pub: pub)
-    }
+        let fromSym = DexBridgeResult.sanitizeSymbol(fromPicker.symbol())
+        let toSym = DexBridgeResult.sanitizeSymbol(toPicker.symbol())
+        let amountIn = text(amountInField)
+        let amountOut = lastQuotedAmountOut ?? ""
+        let release = ReleaseStore.readActive()
+        let fromContract = DexScreenChrome.resolveTokenContract(fromPicker.tokenValue(), release: release)
+        let toContract = DexScreenChrome.resolveTokenContract(toPicker.tokenValue(), release: release)
+        let fromNative = fromPicker.isNative
+        let forWord = L.lang("swap-for", fallback: "for")
 
-    private func submitApproval(priv: Data, pub: Data) async throws {
-        await MainActor.run {
-            self.setStatus(Localization.shared.lang("swap-approval-status-wait",
-                fallback: "Please wait, checking..."))
+        var routeSuffix = ""
+        if !routeLabel.isHidden, let route = routeLabel.text, let r = route.range(of: ": "),
+           route.contains(" > ") {
+            routeSuffix = " (" + route[r.upperBound...].replacingOccurrences(of: " > ", with: " -> ") + ")"
         }
-        var estimate = DexPayloads.base()
-        estimate["fromTokenValue"] = fromPicker.tokenValue()
-        estimate["fromDecimals"] = fromPicker.decimals()
-        estimate["amount"] = text(amountInField)
-        estimate["fromAddress"] = walletAddress
-        var gasLimit: Int64 = 84_000
-        do {
-            let estJson = try await JsBridge.shared.dexCallAsync(
-                method: "swapEstimateApproveGas", payload: estimate)
-            gasLimit = DexBridgeResult.parseGas(estJson, fallback: 84_000)
-        } catch {
-            gasLimit = 84_000
-        }
-        var keyed = DexPayloads.withKeys(privKey: priv, pubKey: pub)
-        keyed.payload["fromTokenValue"] = fromPicker.tokenValue()
-        keyed.payload["fromDecimals"] = fromPicker.decimals()
-        keyed.payload["amount"] = text(amountInField)
-        keyed.payload["gasLimit"] = Int(gasLimit)
-        _ = try await JsBridge.shared.dexCallAsync(
-            method: "swapSubmitApproval", payload: keyed.payload,
-            privKey: keyed.privKey, pubKey: keyed.pubKey)
-        await MainActor.run {
-            self.setStatus(Localization.shared.lang("swap-approval-status-pending",
-                fallback: "Transaction is still pending..."))
-        }
-        try await pollAllowance(priv: priv, pub: pub, attempt: 0)
-    }
+        let base = ReviewSpec()
+            .action(L.lang("swap", fallback: "Swap") + " " + fromSym + " " + forWord + " " + toSym + routeSuffix)
+            .fromTokenContract(fromContract)
+            .toTokenContract(toContract)
+            .fromAddress(walletAddress)
+            .toAddress(release.router)
+            .quantityValue(fromNative ? amountIn : "0")
+            .tokenQuantityValue(amountIn + " " + fromSym + " " + forWord + " " + amountOut + " " + toSym)
+            .networkText(ReviewSpec.networkText())
 
-    private func pollAllowance(priv: Data, pub: Data, attempt: Int) async throws {
-        let L = Localization.shared
-        if attempt >= Self.approvalPollMax {
-            await MainActor.run {
-                self.failFlow(L.lang("swap-approval-may-close",
-                    fallback: "You may close this dialog, the transaction for approval has already been submitted."))
-            }
-            return
+        let fromValue = fromPicker.tokenValue()
+        let fromDecimals = fromPicker.decimals()
+        let swapArgs: () -> [String: Any] = { [weak self] in
+            guard let self else { return [:] }
+            return [
+                "fromTokenValue": self.fromPicker.tokenValue(),
+                "toTokenValue": self.toPicker.tokenValue(),
+                "fromDecimals": self.fromPicker.decimals(),
+                "toDecimals": self.toPicker.decimals(),
+                "amountIn": amountIn,
+                "lastChanged": "from",
+                "slippagePercent": self.slippagePercent(),
+                "recipientAddress": self.walletAddress
+            ]
         }
-        if attempt > 2 {
-            await MainActor.run {
-                self.setStatus(L.lang("swap-approval-status-minute",
-                    fallback: "This can take up to a minute..."))
-            }
-        }
-        try await Task.sleep(nanoseconds: Self.approvalPollIntervalNs)
-        var payload = DexPayloads.base()
-        payload["fromTokenValue"] = fromPicker.tokenValue()
-        payload["fromDecimals"] = fromPicker.decimals()
-        payload["requiredAmount"] = text(amountInField)
-        payload["ownerAddress"] = walletAddress
-        do {
-            let json = try await JsBridge.shared.dexCallAsync(
-                method: "swapCheckAllowance", payload: payload)
-            let data = try DexBridgeResult.unwrapData(json)
-            let sufficient = (data["sufficient"] as? Bool) ?? false
-            if sufficient {
-                await MainActor.run {
-                    self.setStatus(L.lang("swap-approval-completed",
-                        fallback: "Token approval completed. You can continue with Swap."))
-                }
-                try await estimateAndSubmitSwap(priv: priv, pub: pub)
-            } else {
-                try await pollAllowance(priv: priv, pub: pub, attempt: attempt + 1)
-            }
-        } catch {
-            try await pollAllowance(priv: priv, pub: pub, attempt: attempt + 1)
-        }
-    }
 
-    private func estimateAndSubmitSwap(priv: Data, pub: Data) async throws {
-        await MainActor.run {
-            self.setStatus(Localization.shared.getSubmittingTransactionByLangValues())
+        var steps: [TxStep] = []
+        if needsApproval {
+            let approveReview = ReviewSpec()
+                .action(L.lang("approve", fallback: "Approve") + " " + fromSym)
+                .fromTokenContractLabelKey("approval-token-contract")
+                .toTokenContract(ReviewSpec.HIDE)
+                .toAddress(fromContract)
+                .quantityValue("0")
+                .tokenQuantityLabelKey("approval-token-quantity")
+                .tokenQuantityValue(amountIn + " " + fromSym)
+            let approvePayload: () -> [String: Any] = {
+                ["fromTokenValue": fromValue, "fromDecimals": fromDecimals, "amount": amountIn]
+            }
+            steps.append(TxStep(label: L.lang("approve", fallback: "Approve") + " " + fromSym,
+                                kind: .approve, estimatePayload: approvePayload,
+                                submitMethod: "swapSubmitApproval", submitPayload: approvePayload,
+                                reviewOverride: approveReview))
         }
-        var estimate = DexPayloads.base()
-        putSwapArgs(&estimate)
-        estimate["recipientAddress"] = walletAddress
-        var gasLimit: Int64 = 300_000
-        do {
-            let estJson = try await JsBridge.shared.dexCallAsync(
-                method: "swapEstimateGas", payload: estimate)
-            gasLimit = DexBridgeResult.parseGas(estJson, fallback: 300_000)
-        } catch {
-            gasLimit = 300_000
-        }
-        var keyed = DexPayloads.withKeys(privKey: priv, pubKey: pub)
-        putSwapArgs(&keyed.payload)
-        keyed.payload["recipientAddress"] = walletAddress
-        keyed.payload["gasLimit"] = Int(gasLimit)
-        let json = try await JsBridge.shared.dexCallAsync(
-            method: "swapSubmitSwap", payload: keyed.payload,
-            privKey: keyed.privKey, pubKey: keyed.pubKey)
-        let data = try DexBridgeResult.unwrapData(json)
-        let txHash = (data["txHash"] as? String) ?? ""
-        await MainActor.run {
+        steps.append(TxStep(label: L.lang("swap", fallback: "Swap") + " " + fromSym + " -> " + toSym,
+                            kind: .swap, estimatePayload: swapArgs,
+                            submitMethod: "swapSubmitSwap", submitPayload: swapArgs))
+
+        flowInFlight = true
+        let dlg = TxStepsDialogViewController(title: L.lang("swap", fallback: "Swap"),
+                                              walletAddress: walletAddress, steps: steps, baseReview: base)
+        dlg.onClose = { [weak self] in
+            guard let self else { return }
+            self.stepsDialog = nil
             self.flowInFlight = false
-            self.setBusy(false)
-            self.clearStatus()
             self.lastQuotedAmountOut = nil
-            self.amountOutLabel.text = "-"
-            let L = Localization.shared
-            let dlg = MessageInformationDialogViewController(
-                title: L.lang("swap", fallback: "Swap"),
-                message: L.lang("swap-succeeded",
-                    fallback: "Swap transaction succeeded.") + "\n\n" + txHash)
-            self.present(dlg, animated: true)
+            self.setAmountSilently(self.amountInField, "")
+            self.setAmountSilently(self.amountOutField, "")
+            self.updateBalances()
         }
-    }
-
-    private func putSwapArgs(_ payload: inout [String: Any]) {
-        payload["fromTokenValue"] = fromPicker.tokenValue()
-        payload["toTokenValue"] = toPicker.tokenValue()
-        payload["fromDecimals"] = fromPicker.decimals()
-        payload["toDecimals"] = toPicker.decimals()
-        payload["amountIn"] = text(amountInField)
-        payload["lastChanged"] = "from"
-        payload["slippagePercent"] = slippagePercent()
+        stepsDialog = dlg
+        dlg.show(from: self)
     }
 
     // MARK: - Helpers
 
     private func validateInputs(_ amountIn: String) -> Bool {
         let L = Localization.shared
+        if fromPicker.isEmpty || toPicker.isEmpty {
+            DexScreenChrome.presentError(from: self, message: L.lang("select-both-tokens",
+                fallback: "Select both tokens."))
+            return false
+        }
         if fromPicker.tokenValue().caseInsensitiveCompare(toPicker.tokenValue()) == .orderedSame {
             DexScreenChrome.presentError(from: self, message: L.err(
                 "identicalTokens", fallback: "From and To tokens must differ."))
             return false
         }
-        if amountIn.isEmpty || amountIn.range(of: #"^\d*\.?\d+$"#, options: .regularExpression) == nil
-            || (Double(amountIn) ?? 0) <= 0 {
+        if !Self.isPositiveAmount(amountIn) {
             DexScreenChrome.presentError(from: self, message: L.err(
                 "invalidQuantity", fallback: "Enter a valid quantity."))
             return false
@@ -476,22 +505,14 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
         return true
     }
 
+    private static func isPositiveAmount(_ s: String) -> Bool {
+        !s.isEmpty && s.range(of: #"^\d*\.?\d+$"#, options: .regularExpression) != nil
+            && (Double(s) ?? 0) > 0
+    }
+
     private func slippagePercent() -> Double {
         let v = Double(text(slippageField)) ?? 1
         return max(0, min(100, v))
-    }
-
-    private func minOutForDisplay() -> String {
-        guard let quoted = lastQuotedAmountOut,
-        let out = Decimal(string: quoted) else {
-            return lastQuotedAmountOut ?? "-"
-        }
-        let pct = Decimal(100 - Int(slippagePercent())) / 100
-        let minOut = out * pct
-        var result = minOut
-        var rounded = Decimal()
-        NSDecimalRound(&rounded, &result, 18, .plain)
-        return "\(rounded)"
     }
 
     private func text(_ f: UITextField) -> String {
@@ -500,23 +521,12 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
 
     private func setBusy(_ busy: Bool) {
         if busy { spinner.startAnimating() } else { spinner.stopAnimating() }
-        quoteButton.isEnabled = !busy
-        swapButton.isEnabled = !busy
-    }
-
-    private func setStatus(_ message: String) {
-        statusLabel.text = message
-        statusLabel.isHidden = false
-    }
-
-    private func clearStatus() {
-        statusLabel.isHidden = true
     }
 
     private func failFlow(_ error: String?) {
         flowInFlight = false
         setBusy(false)
-        clearStatus()
+        statusLabel.isHidden = true
         if let error, !error.isEmpty {
             DexScreenChrome.presentError(from: self, message: error)
         }

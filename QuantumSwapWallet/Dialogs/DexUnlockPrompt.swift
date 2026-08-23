@@ -15,10 +15,23 @@ public enum DexUnlockPrompt {
     public static func show(from host: UIViewController,
         onUnlocked: @escaping (String) -> Void,
         onCancel: (() -> Void)? = nil) {
+        show(from: host, onUnlocked: onUnlocked, onCancel: onCancel, onClosed: nil)
+    }
+
+    /// Variant with an `onClosed` callback that runs on ANY dismissal
+    /// (unlock or cancel) so step-driven flows (TxStepsDialog) can
+    /// re-enable their footer when the user backs out of the gate.
+    public static func show(from host: UIViewController,
+        onUnlocked: @escaping (String) -> Void,
+        onCancel: (() -> Void)?,
+        onClosed: (() -> Void)?) {
         let L = Localization.shared
         let dlg = UnlockDialogViewController()
         dlg.isMandatory = false
-        dlg.onCancel = onCancel
+        dlg.onCancel = {
+            onClosed?()
+            onCancel?()
+        }
         dlg.onUnlock = { [weak dlg] pw in
             guard let dlg else { return }
             if pw.isEmpty {
@@ -35,6 +48,7 @@ public enum DexUnlockPrompt {
                     await MainActor.run {
                         wait?.dismiss(animated: true) {
                             dlg?.dismiss(animated: true) {
+                                onClosed?()
                                 onUnlocked(trimmed)
                             }
                         }
@@ -57,6 +71,42 @@ public enum DexUnlockPrompt {
             }
         }
         host.present(dlg, animated: true)
+    }
+
+    /// Password gate, then load the signing credentials behind the
+    /// "wallet is being decrypted and opened" wait box. Failure shows
+    /// an error dialog and routes to `onCancel` (the caller steps back
+    /// to its ready state). Android: WalletUnlock.verifyAndLoad via the
+    /// review dialog's Ok handler.
+    public static func unlockAndLoadCredentials(
+        from host: UIViewController,
+        walletAddress: String,
+        onCredentials: @escaping (Credentials) -> Void,
+        onCancel: @escaping () -> Void) {
+        let L = Localization.shared
+        show(from: host, onUnlocked: { [weak host] _ in
+            guard let host else { return }
+            let wait = WaitDialogViewController(message: L.getWaitWalletOpenByLangValues())
+            host.present(wait, animated: true)
+            Task.detached(priority: .userInitiated) { [weak wait] in
+                do {
+                    let creds = try WalletUnlock.loadCredentials(walletAddress: walletAddress)
+                    await MainActor.run {
+                        wait?.dismiss(animated: true) { onCredentials(creds) }
+                    }
+                } catch {
+                    await MainActor.run { [weak host] in
+                        wait?.dismiss(animated: true) {
+                            if let host {
+                                DexScreenChrome.presentError(from: host,
+                                    message: error.localizedDescription)
+                            }
+                            onCancel()
+                        }
+                    }
+                }
+            }
+        }, onCancel: onCancel)
     }
 
     /// Unlock then load keys for `walletAddress`. Throws

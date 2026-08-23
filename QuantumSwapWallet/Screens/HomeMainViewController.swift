@@ -91,9 +91,9 @@ UITableViewDelegate {
     /// surface that lets the user see at a glance whether a token
     /// row is vendor-vouched (recognized) or strictly indexer-
     /// derived (unrecognized).
-    private let tokensSegmentedControl: UISegmentedControl = {
+    private let tokensSegmentedControl: SegmentUnderlineControl = {
         let L = Localization.shared
-        return UISegmentedControl(items: [
+        return SegmentUnderlineControl(items: [
             L.getTokensTabByLangValues(),
             L.getUnrecognizedTokensTabByLangValues()
         ])
