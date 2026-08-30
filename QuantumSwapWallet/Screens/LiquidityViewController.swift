@@ -58,7 +58,11 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
         refresh.setImage(UIImage(systemName: "arrow.clockwise"), for: .normal)
         refresh.tintColor = UIColor(named: "colorCommon6") ?? .label
         refresh.addTarget(self, action: #selector(loadPositions), for: .touchUpInside)
-        let headerRow = UIStackView(arrangedSubviews: [positionsTitle, UIView(), refresh, spinner])
+        // "Add Liquidity" lives at the top right of the box, left of
+        // the refresh icon (same pattern as Pools' Create Pair).
+        let addLink = DexScreenChrome.makeLink(L.lang("add-liquidity", fallback: "Add Liquidity"),
+                                               underline: true, target: self, action: #selector(showAddPanel))
+        let headerRow = UIStackView(arrangedSubviews: [positionsTitle, UIView(), addLink, refresh, spinner])
         headerRow.axis = .horizontal
         headerRow.alignment = .center
         headerRow.spacing = 8
@@ -76,15 +80,9 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
         // scrolls vertically inside the box.
         positionsScroll.capToScreen(reserveBelow: 70)
 
-        let addLink = DexScreenChrome.makeLink(L.lang("add-liquidity", fallback: "Add Liquidity"),
-                                               underline: true, target: self, action: #selector(showAddPanel))
-        let addLinkRow = UIStackView(arrangedSubviews: [UIView(), addLink, UIView()])
-        addLinkRow.axis = .horizontal
-        addLinkRow.distribution = .equalCentering
-
         listPanel.axis = .vertical
         listPanel.spacing = 10
-        [headerRow, noPositionsLabel, positionsScroll, addLinkRow].forEach { listPanel.addArrangedSubview($0) }
+        [headerRow, noPositionsLabel, positionsScroll].forEach { listPanel.addArrangedSubview($0) }
 
         // ---- Form panel -------------------------------------------------
         let addTitle = UILabel()
@@ -301,20 +299,38 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
                 symA: sym0.isEmpty ? DexBridgeResult.shortAddr(token0) : sym0, tokenA: token0,
                 symB: sym1.isEmpty ? DexBridgeResult.shortAddr(token1) : sym1, tokenB: token1)
 
-            let lp = UILabel()
-            lp.text = L.lang("lp-tokens", fallback: "LP tokens") + ": "
-                + CoinUtils.formatUnits(pos["lpBalance"] as? String, decimals: 18)
-            lp.font = Typography.body(13)
-            lp.textColor = UIColor(named: "colorCommon3") ?? .secondaryLabel
-
+            // Web-app positions.ts stat rows: the user's own numbers
+            // (LP balance, pool share, the pooled amount of each
+            // token) instead of the raw LP figure + POOL-TOTAL
+            // reserves, which read as unexplained numbers.
             let dec0 = (pos["decimals0"] as? Int) ?? (pos["decimals0"] as? NSNumber)?.intValue ?? 18
             let dec1 = (pos["decimals1"] as? Int) ?? (pos["decimals1"] as? NSNumber)?.intValue ?? 18
-            let reserves = UILabel()
-            reserves.text = L.lang("pool-reserves", fallback: "Reserves") + ": "
-                + CoinUtils.formatUnits(pos["reserve0"] as? String, decimals: dec0) + " / "
-                + CoinUtils.formatUnits(pos["reserve1"] as? String, decimals: dec1)
-            reserves.font = Typography.body(13)
-            reserves.textColor = UIColor(named: "colorCommon3") ?? .secondaryLabel
+            let lpUnits = Double(CoinUtils.formatUnits(pos["lpBalance"] as? String, decimals: 18)) ?? 0
+            let supplyUnits = Double(CoinUtils.formatUnits(pos["totalSupply"] as? String, decimals: 18)) ?? 0
+            let share = supplyUnits > 0 ? lpUnits / supplyUnits : 0
+            let r0 = Double(CoinUtils.formatUnits(pos["reserve0"] as? String, decimals: dec0)) ?? 0
+            let r1 = Double(CoinUtils.formatUnits(pos["reserve1"] as? String, decimals: dec1)) ?? 0
+            let name0 = sym0.isEmpty ? DexBridgeResult.shortAddr(token0) : sym0
+            let name1 = sym1.isEmpty ? DexBridgeResult.shortAddr(token1) : sym1
+            func stat(_ text: String) -> UILabel {
+                let l = UILabel()
+                l.text = text
+                l.font = Typography.body(13)
+                l.textColor = UIColor(named: "colorCommon3") ?? .secondaryLabel
+                return l
+            }
+            let stats: [UILabel] = [
+                stat(L.lang("lp-balance", fallback: "LP balance") + ": "
+                     + String(format: "%.6f", lpUnits)),
+                stat(L.lang("pool-share", fallback: "Pool share") + ": "
+                     + String(format: "%.4f", share * 100) + "%"),
+                stat(L.lang("pooled-token", fallback: "Pooled [SYM]")
+                     .replacingOccurrences(of: "[SYM]", with: name0)
+                     + ": " + String(format: "%.6f", r0 * share)),
+                stat(L.lang("pooled-token", fallback: "Pooled [SYM]")
+                     .replacingOccurrences(of: "[SYM]", with: name1)
+                     + ": " + String(format: "%.6f", r1 * share))
+            ]
 
             // Desktop position card: "Remove Liquidity" is a link.
             let remove = UIButton(type: .system)
@@ -326,7 +342,7 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
             remove.contentEdgeInsets = UIEdgeInsets(top: 6, left: 0, bottom: 6, right: 8)
             remove.addAction(UIAction { [weak self] _ in self?.promptRemove(pos) }, for: .touchUpInside)
 
-            [pair, lp, reserves, remove, DexScreenChrome.makeDivider()].forEach { row.addArrangedSubview($0) }
+            ([pair] + stats + [remove, DexScreenChrome.makeDivider()]).forEach { row.addArrangedSubview($0) }
             positionsStack.addArrangedSubview(row)
         }
     }
@@ -334,27 +350,24 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
     // MARK: - Remove
 
     private func promptRemove(_ pos: [String: Any]) {
-        let L = Localization.shared
-        let alert = UIAlertController(
-            title: L.lang("remove-liquidity", fallback: "Remove Liquidity"),
-            message: L.lang("remove-percent", fallback: "Percent of position to remove"),
-            preferredStyle: .alert)
-        alert.addTextField { tf in
-            tf.keyboardType = .numberPad
-            tf.text = "100"
-            tf.textAlignment = .center
+        // Web-app removeLiquidity.ts form: percent readout + slider +
+        // preset chips + live "what you get" stats, replacing the old
+        // bare "100" number box that explained nothing.
+        let dec0 = (pos["decimals0"] as? Int) ?? (pos["decimals0"] as? NSNumber)?.intValue ?? 18
+        let dec1 = (pos["decimals1"] as? Int) ?? (pos["decimals1"] as? NSNumber)?.intValue ?? 18
+        let sym0 = DexBridgeResult.sanitizeSymbol(pos["symbol0"] as? String)
+        let sym1 = DexBridgeResult.sanitizeSymbol(pos["symbol1"] as? String)
+        let dialog = RemoveLiquidityDialogViewController(
+            lpUnits: Double(CoinUtils.formatUnits(pos["lpBalance"] as? String, decimals: 18)) ?? 0,
+            supplyUnits: Double(CoinUtils.formatUnits(pos["totalSupply"] as? String, decimals: 18)) ?? 0,
+            reserve0Units: Double(CoinUtils.formatUnits(pos["reserve0"] as? String, decimals: dec0)) ?? 0,
+            reserve1Units: Double(CoinUtils.formatUnits(pos["reserve1"] as? String, decimals: dec1)) ?? 0,
+            sym0: sym0.isEmpty ? DexBridgeResult.shortAddr(pos["token0"] as? String) : sym0,
+            sym1: sym1.isEmpty ? DexBridgeResult.shortAddr(pos["token1"] as? String) : sym1)
+        dialog.onConfirm = { [weak self] pct in
+            self?.runRemoveFlow(pos, percent: pct)
         }
-        alert.addAction(UIAlertAction(title: L.getCancelByLangValues(), style: .cancel))
-        alert.addAction(UIAlertAction(title: L.getOkByLangValues(), style: .default) { [weak self] _ in
-            guard let self else { return }
-            let pct = Int(alert.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
-            if pct <= 0 || pct > 100 {
-                DexScreenChrome.presentError(from: self, message: L.err("invalidQuantity", fallback: "Enter a valid quantity."))
-                return
-            }
-            self.runRemoveFlow(pos, percent: pct)
-        })
-        present(alert, animated: true)
+        present(dialog, animated: true)
     }
 
     /// Desktop tx-steps model for Remove: compute the burn amounts (no
@@ -641,5 +654,180 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
 
     private static func dictArray(_ any: Any?) -> [[String: Any]] {
         (any as? [[String: Any]]) ?? []
+    }
+}
+
+
+// MARK: - Remove-liquidity form (web removeLiquidity.ts)
+
+/// Percent slider + 25/50/75/100 preset chips + live stats (LP tokens
+/// burned, the amount of each token received, the LP balance) + the
+/// one-time-approval note + Cancel / "Approve & remove". Display math
+/// runs on unit-formatted doubles; the exact BigInteger amounts are
+/// recomputed by `runRemoveFlow` when the user confirms.
+fileprivate final class RemoveLiquidityDialogViewController: ModalDialogViewController {
+
+    var onConfirm: ((Int) -> Void)?
+
+    private let lpUnits: Double
+    private let supplyUnits: Double
+    private let reserve0Units: Double
+    private let reserve1Units: Double
+    private let sym0: String
+    private let sym1: String
+
+    private var percent = 50
+    private let pctLabel = UILabel()
+    private let slider = UISlider()
+    private var chips: [UIButton] = []
+    private let chipValues = [25, 50, 75, 100]
+    private var statValues: [UILabel] = []
+
+    init(lpUnits: Double, supplyUnits: Double, reserve0Units: Double,
+         reserve1Units: Double, sym0: String, sym1: String) {
+        self.lpUnits = lpUnits
+        self.supplyUnits = supplyUnits
+        self.reserve0Units = reserve0Units
+        self.reserve1Units = reserve1Units
+        self.sym0 = sym0
+        self.sym1 = sym1
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        let L = Localization.shared
+
+        let title = UILabel()
+        title.text = L.lang("remove-liquidity", fallback: "Remove Liquidity")
+        title.font = Typography.boldTitle(17)
+        title.textColor = UIColor(named: "colorCommon6") ?? .label
+        title.textAlignment = .center
+
+        pctLabel.font = Typography.boldTitle(28)
+        pctLabel.textColor = UIColor(named: "colorCommon6") ?? .label
+        pctLabel.textAlignment = .center
+
+        slider.minimumValue = 1
+        slider.maximumValue = 100
+        slider.minimumTrackTintColor = .quantumTeal
+        slider.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.percent = Int(self.slider.value.rounded())
+            self.refresh()
+        }, for: .valueChanged)
+
+        for v in chipValues {
+            let chip = UIButton(type: .system)
+            chip.setTitle("\(v)%", for: .normal)
+            chip.titleLabel?.font = Typography.body(13)
+            chip.layer.cornerRadius = 6
+            chip.layer.borderWidth = 1
+            chip.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
+            chip.addAction(UIAction { [weak self] _ in
+                self?.percent = v
+                self?.refresh()
+            }, for: .touchUpInside)
+            chips.append(chip)
+        }
+        let chipRow = UIStackView(arrangedSubviews: chips + [UIView()])
+        chipRow.axis = .horizontal
+        chipRow.spacing = 8
+
+        // Stat rows: label left, live value right (web statRow).
+        var statRows: [UIView] = []
+        let statNames = [
+            L.lang("remove-lp-burned", fallback: "LP tokens burned"),
+            L.lang("remove-you-receive", fallback: "You receive [SYM]")
+                .replacingOccurrences(of: "[SYM]", with: sym0),
+            L.lang("remove-you-receive", fallback: "You receive [SYM]")
+                .replacingOccurrences(of: "[SYM]", with: sym1),
+            L.lang("remove-your-lp-balance", fallback: "Your LP balance")
+        ]
+        for name in statNames {
+            let n = UILabel()
+            n.text = name
+            n.font = Typography.body(13)
+            n.textColor = UIColor(named: "colorCommon3") ?? .secondaryLabel
+            let v = UILabel()
+            v.font = Typography.body(13)
+            v.textColor = UIColor(named: "colorCommon6") ?? .label
+            v.textAlignment = .right
+            statValues.append(v)
+            let row = UIStackView(arrangedSubviews: [n, v])
+            row.axis = .horizontal
+            row.spacing = 8
+            statRows.append(row)
+        }
+
+        let note = UILabel()
+        note.text = L.lang("remove-approval-note",
+            fallback: "The router needs a one-time approval to spend your LP tokens before removing.")
+        note.font = Typography.body(12)
+        note.textColor = UIColor(rgbHex: 0x9A9AA6)
+        note.numberOfLines = 0
+
+        let cancel = GrayPillButton(type: .system)
+        cancel.setTitle(L.getCancelByLangValues(), for: .normal)
+        cancel.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
+        let confirm = GreenPillButton(type: .system)
+        confirm.setTitle(L.lang("remove-approve-cta", fallback: "Approve & remove"), for: .normal)
+        confirm.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            let pct = self.percent
+            self.dismiss(animated: true) { [onConfirm] in onConfirm?(pct) }
+        }, for: .touchUpInside)
+        for b in [cancel, confirm] {
+            b.heightAnchor.constraint(equalToConstant: 43).isActive = true
+            b.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
+        }
+        let spacer = UIView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let buttonRow = UIStackView(arrangedSubviews: [spacer, cancel, confirm])
+        buttonRow.axis = .horizontal
+        buttonRow.spacing = 12
+        buttonRow.alignment = .center
+
+        let statsStack = UIStackView(arrangedSubviews: statRows)
+        statsStack.axis = .vertical
+        statsStack.spacing = 6
+
+        let stack = UIStackView(arrangedSubviews: [
+            title, pctLabel, slider, chipRow, statsStack, note, buttonRow
+        ])
+        stack.axis = .vertical
+        stack.spacing = 14
+        stack.setCustomSpacing(6, after: pctLabel)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -20),
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
+            card.widthAnchor.constraint(equalToConstant: 340)
+        ])
+        view.installPressFeedbackRecursive()
+        refresh()
+    }
+
+    private func refresh() {
+        pctLabel.text = "\(percent)%"
+        slider.value = Float(percent)
+        for (chip, v) in zip(chips, chipValues) {
+            let active = v == percent
+            chip.layer.borderColor = (active ? UIColor.quantumTeal
+                : UIColor(rgbHex: 0x9A9AA6).withAlphaComponent(0.5)).cgColor
+            chip.setTitleColor(active ? .quantumTeal
+                : UIColor(rgbHex: 0x9A9AA6), for: .normal)
+        }
+        let burned = lpUnits * Double(percent) / 100
+        let share = supplyUnits > 0 ? burned / supplyUnits : 0
+        let values = [burned, reserve0Units * share, reserve1Units * share, lpUnits]
+        for (label, value) in zip(statValues, values) {
+            label.text = String(format: "%.6f", value)
+        }
     }
 }

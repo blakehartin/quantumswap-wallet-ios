@@ -509,7 +509,7 @@ HomeScreenViewTypeProviding {
 
     /// Build a single transaction row. The In/Out cell renders an
     /// up- or down-arrow circle plus an optional orange failure
-    /// triangle (Completed tab only). Quantity / Date / From / To /
+    /// exclamation (Completed tab only). Quantity / Date / From / To /
     /// Hash mirror the Android adapter exactly.
     private func makeBodyRow(txn: AccountTransaction,
         walletAddress: String,
@@ -654,7 +654,7 @@ HomeScreenViewTypeProviding {
             ])
     }
 
-    /// Renders the In/Out cell: optional 22pt orange failure triangle
+    /// Renders the In/Out cell: optional 22pt red failure exclamation
     /// followed by a 30pt up- or down-arrow circle, both centred.
     /// Mirrors Android's
     /// `linearLayout_account_transactions_inout` row.
@@ -665,8 +665,9 @@ HomeScreenViewTypeProviding {
         row.spacing = 4
         row.translatesAutoresizingMaskIntoConstraints = false
 
-        let failed = UIImageView(image: UIImage(systemName: "exclamationmark.triangle"))
-        failed.tintColor = UIColor(named: "colorCommon6") ?? .systemOrange
+        // Android parity: alert_outline - the red exclamation icon -
+        // not an SF Symbols triangle.
+        let failed = UIImageView(image: StatusIcons.alertOutline(size: 22))
         failed.contentMode = .scaleAspectFit
         failed.translatesAutoresizingMaskIntoConstraints = false
         failed.widthAnchor.constraint(equalToConstant: 22).isActive = true
