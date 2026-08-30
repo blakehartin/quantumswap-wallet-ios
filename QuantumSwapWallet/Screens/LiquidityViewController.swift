@@ -21,7 +21,7 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
     private let listPanel = UIStackView()
     private let formPanel = UIStackView()
     private let positionsStack = UIStackView()
-    private let positionsScroll = MaxHeightScrollView()
+    private let positionsScroll = AutoHorizontalScrollView()
     private let noPositionsLabel = UILabel()
     private let statusLabel = UILabel()
     private let spinner = UIActivityIndicatorView(style: .medium)
@@ -35,7 +35,11 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
         let L = Localization.shared
         walletAddress = DexScreenChrome.currentWalletAddress()
 
@@ -62,12 +66,14 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
 
         noPositionsLabel.text = L.lang("no-positions", fallback: "You have no liquidity positions.")
         noPositionsLabel.font = Typography.body(13)
-        noPositionsLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        noPositionsLabel.textColor = UIColor(rgbHex: 0x9A9AA6) // Android colorMutedSecondaryText
         noPositionsLabel.numberOfLines = 0
 
         positionsStack.axis = .vertical
         positionsStack.spacing = 4
         positionsScroll.install(content: positionsStack)
+        // Cap so the card bottom border stays on screen; overflow
+        // scrolls vertically inside the box.
         positionsScroll.capToScreen(reserveBelow: 70)
 
         let addLink = DexScreenChrome.makeLink(L.lang("add-liquidity", fallback: "Add Liquidity"),
@@ -94,12 +100,15 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
         slippageField.text = "1"
         addButton.setTitle(L.lang("add-liquidity", fallback: "Add Liquidity"), for: .normal)
         addButton.addTarget(self, action: #selector(startAdd), for: .touchUpInside)
+        // Same footprint as the Send screen's primary button.
+        addButton.heightAnchor.constraint(equalToConstant: 43).isActive = true
+        addButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
         let addRow = UIStackView(arrangedSubviews: [UIView(), addButton, UIView()])
         addRow.axis = .horizontal
         addRow.distribution = .equalCentering
 
         statusLabel.font = Typography.body(12)
-        statusLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        statusLabel.textColor = UIColor(rgbHex: 0xFBBF24) // Android quantumAmber
         statusLabel.numberOfLines = 0
         statusLabel.isHidden = true
 
@@ -112,27 +121,23 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
          DexScreenChrome.makeLabel(L.lang("slippage", fallback: "Slippage")), slippageField,
          statusLabel, addRow].forEach { formPanel.addArrangedSubview($0) }
 
-        let content = UIStackView(arrangedSubviews: [backBar, title, DexScreenChrome.makeDivider(), listPanel, formPanel])
+        let content = UIStackView(arrangedSubviews: [title, DexScreenChrome.makeDivider(), listPanel, formPanel])
         content.axis = .vertical
         content.spacing = 10
-        content.setCustomSpacing(8, after: backBar)
 
         let scroll = UIScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.keyboardDismissMode = .interactive
-        content.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scroll)
-        scroll.addSubview(content)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
-            content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 8),
-            content.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16),
-            content.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
-            content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24)
+            scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor)
         ])
+        // Android parity: back arrow above the 22pt gradient card,
+        // both scrolling together (center_container screen shell).
+        ScreenCard.install(in: scroll, backBar: backBar, content: content)
 
         Task { [weak self] in
             guard let self else { return }

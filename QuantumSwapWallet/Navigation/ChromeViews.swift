@@ -318,7 +318,7 @@ public final class CenterStripView: UIView {
         let label = UILabel()
         label.text = title
         label.font = Typography.body(12)
-        label.textColor = UIColor(named: "colorPrimary") ?? .systemPurple
+        label.textColor = UIColor(named: "colorCommon6") ?? .white // Android tile label colorCommon6
         label.textAlignment = .center
 
         let col = UIStackView(arrangedSubviews: [card, label])

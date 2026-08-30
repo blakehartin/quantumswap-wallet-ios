@@ -34,9 +34,20 @@ final class TokenTableLayoutTests: XCTestCase {
         let vc = HomeMainViewController()
         vc.view.frame = CGRect(x: 0, y: 0, width: width, height: height)
         vc.view.layoutIfNeeded()
+        // Android-parity structure: the fixed bordered card is a
+        // direct child of the screen and the horizontal scroller
+        // lives INSIDE it, so search the hierarchy recursively.
+        func findScroller(_ v: UIView) -> UIScrollView? {
+            if let s = v as? UIScrollView,
+               s.accessibilityIdentifier == "tokenTableHorizontalScroll" {
+                return s
+            }
+            for sub in v.subviews { if let hit = findScroller(sub) { return hit } }
+            return nil
+        }
         let scroller = try XCTUnwrap(
-            vc.view.subviews.compactMap { $0 as? UIScrollView }.first,
-            "Home main screen must host the token card in a horizontal scroll view.")
+            findScroller(vc.view),
+            "Home main screen must host the token grid in a horizontal scroll view inside the card.")
         return scroller
     }
 

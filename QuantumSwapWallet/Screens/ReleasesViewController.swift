@@ -30,7 +30,11 @@ public final class ReleasesViewController: UIViewController, HomeScreenViewTypeP
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
         let L = Localization.shared
 
         let backBar = makeBackBar(action: #selector(tapBack))
@@ -62,9 +66,12 @@ public final class ReleasesViewController: UIViewController, HomeScreenViewTypeP
 
         addButton.setTitle(L.lang("add-release", fallback: "Add Release"), for: .normal)
         addButton.addTarget(self, action: #selector(startAdd), for: .touchUpInside)
+        // Same footprint as the Send screen's primary button.
+        addButton.heightAnchor.constraint(equalToConstant: 43).isActive = true
+        addButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
 
         statusLabel.font = Typography.body(13)
-        statusLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        statusLabel.textColor = UIColor(rgbHex: 0xFBBF24) // Android quantumAmber
         statusLabel.numberOfLines = 0
         statusLabel.isHidden = true
 
@@ -76,27 +83,23 @@ public final class ReleasesViewController: UIViewController, HomeScreenViewTypeP
         form.spacing = 10
 
         let content = UIStackView(arrangedSubviews: [
-            backBar, title, DexScreenChrome.makeDivider(), listStack, apiStatusLabel, form
+            title, DexScreenChrome.makeDivider(), listStack, apiStatusLabel, form
         ])
         content.axis = .vertical
         content.spacing = 12
-        content.setCustomSpacing(8, after: backBar)
 
         let scroll = UIScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        content.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scroll)
-        scroll.addSubview(content)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 8),
-            content.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16),
-            content.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
-            content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24)
+            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+        // Android parity: back arrow above the 22pt gradient card,
+        // both scrolling together (center_container screen shell).
+        ScreenCard.install(in: scroll, backBar: backBar, content: content)
 
         renderList()
         loadApiStatus()

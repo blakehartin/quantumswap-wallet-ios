@@ -48,7 +48,6 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
     /// dialog closes and the close handler re-quotes exact-in from the
     /// quoted input instead of clearing the amounts.
     private var restartAsExactIn = false
-    private let exactOutHintLabel = UILabel()
     /// The path the last quote priced (web-app routePath): sent with the
     /// swap payload so estimate and submit build the same route.
     private var lastQuotedPath: [String]?
@@ -63,7 +62,11 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
         let L = Localization.shared
         walletAddress = DexScreenChrome.currentWalletAddress()
 
@@ -75,7 +78,7 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
 
         let releaseBanner = UILabel()
         releaseBanner.font = Typography.body(12)
-        releaseBanner.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        releaseBanner.textColor = UIColor(rgbHex: 0xFBBF24) // Android quantumAmber
         releaseBanner.numberOfLines = 0
         let active = ReleaseStore.readActive()
         if !active.builtin {
@@ -95,13 +98,6 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
 
         buildBox(fromBox, balanceButton: fromBalanceButton, field: amountInField, fromSide: true)
         buildBox(toBox, balanceButton: toBalanceButton, field: amountOutField, fromSide: false)
-        exactOutHintLabel.text = L.lang("swap-exact-output-unavailable-fee-token",
-            fallback: "Exact output is not available for tokens that burn or tax on transfer. Enter the quantity to swap in the From field.")
-        exactOutHintLabel.font = Typography.body(12)
-        exactOutHintLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
-        exactOutHintLabel.numberOfLines = 0
-        exactOutHintLabel.isHidden = true
-        toBox.addArrangedSubview(exactOutHintLabel)
 
         // Flip button (desktop swap-flip): 40pt oval.
         let flip = UIButton(type: .custom)
@@ -126,22 +122,27 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
         slippageField.addAction(UIAction { [weak self] _ in self?.slippageEdited() }, for: .editingChanged)
 
         routeLabel.font = Typography.body(12)
-        routeLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        routeLabel.textColor = UIColor(rgbHex: 0x9A9AA6) // Android colorMutedSecondaryText
         routeLabel.numberOfLines = 0
         routeLabel.isHidden = true
 
         quoteSourceLabel.font = Typography.body(12)
-        quoteSourceLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        quoteSourceLabel.textColor = UIColor(rgbHex: 0x9A9AA6) // Android colorMutedSecondaryText
         quoteSourceLabel.numberOfLines = 0
         quoteSourceLabel.isHidden = true
 
         statusLabel.font = Typography.body(12)
-        statusLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        statusLabel.textColor = UIColor(rgbHex: 0xFBBF24) // Android quantumAmber
         statusLabel.numberOfLines = 0
         statusLabel.isHidden = true
 
         nextButton.setTitle(L.lang("next", fallback: "Next"), for: .normal)
         nextButton.addTarget(self, action: #selector(tapNext), for: .touchUpInside)
+        // Same footprint as Send's primary button (43pt tall, >=96pt
+        // wide) so the CTA reads at regular size instead of hugging
+        // the short "Next" title.
+        nextButton.heightAnchor.constraint(equalToConstant: 43).isActive = true
+        nextButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
         spinner.hidesWhenStopped = true
         let footerSpacer = UIView()
         footerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -167,7 +168,7 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
         slippageRow.alignment = .center
 
         let content = UIStackView(arrangedSubviews: [
-            backBar, title, DexScreenChrome.makeDivider(), releaseBanner,
+            title, DexScreenChrome.makeDivider(), releaseBanner,
             DexScreenChrome.makeLabel(L.lang("swap-from-token", fallback: "From token")),
             fromPicker,
             fromBox,
@@ -184,25 +185,21 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
         ])
         content.axis = .vertical
         content.spacing = 10
-        content.setCustomSpacing(8, after: backBar)
         content.setCustomSpacing(4, after: flipRow)
 
         let scroll = UIScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.keyboardDismissMode = .interactive
-        content.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scroll)
-        scroll.addSubview(content)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
-            content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 8),
-            content.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16),
-            content.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
-            content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24)
+            scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor)
         ])
+        // Android parity: back arrow above the 22pt gradient card,
+        // both scrolling together (swap_fragment.xml structure).
+        ScreenCard.install(in: scroll, backBar: backBar, content: content)
 
         onTokensChanged()
         Task { [weak self] in
@@ -286,7 +283,6 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
         let locked = exactOutLocked()
         amountOutField.isUserInteractionEnabled = !locked
         amountOutField.alpha = locked ? 0.6 : 1
-        exactOutHintLabel.isHidden = !(locked && ready)
         let mode = wrapMode()
         nextButton.setTitle(modeLabel(mode), for: .normal)
         guard ready, fromPicker.tokenValue().caseInsensitiveCompare(toPicker.tokenValue()) != .orderedSame else { return }

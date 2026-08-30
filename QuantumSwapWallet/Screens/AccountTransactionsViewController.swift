@@ -90,7 +90,11 @@ HomeScreenViewTypeProviding {
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
 
         // Top action bar: back arrow + refresh icon. Mirrors the
         // `top_linear_layout_account_transactions_id` row in Android's

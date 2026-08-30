@@ -18,7 +18,7 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
     private let listPanel = UIStackView()
     private let formPanel = UIStackView()
     private let poolsStack = UIStackView()
-    private let poolsScroll = MaxHeightScrollView()
+    private let poolsScroll = AutoHorizontalScrollView()
     private let emptyLabel = UILabel()
     private let statusLabel = UILabel()
     private let spinner = UIActivityIndicatorView(style: .medium)
@@ -30,7 +30,11 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(named: "colorBackground") ?? .systemBackground
+        // Transparent so HomeViewController's AmbientBackgroundView
+        // (Android body_ambient: violet / cyan orbs over #050508)
+        // shows through the whole screen instead of being blacked
+        // out by an opaque fill.
+        view.backgroundColor = .clear
         let L = Localization.shared
         walletAddress = DexScreenChrome.currentWalletAddress()
 
@@ -50,29 +54,30 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
         refresh.tintColor = UIColor(named: "colorCommon6") ?? .label
         refresh.addTarget(self, action: #selector(loadPools), for: .touchUpInside)
         spinner.hidesWhenStopped = true
-        let header = UIStackView(arrangedSubviews: [listTitle, UIView(), refresh, spinner])
+        // "Create Pair" lives at the top right of the box (next to
+        // the refresh icon) so it is reachable without scrolling to
+        // the bottom of the pool list.
+        let createLink = DexScreenChrome.makeLink(L.lang("create-pair", fallback: "Create Pair"),
+                                                  underline: true, target: self, action: #selector(showCreatePanel))
+        let header = UIStackView(arrangedSubviews: [listTitle, UIView(), createLink, refresh, spinner])
         header.axis = .horizontal
         header.alignment = .center
         header.spacing = 8
 
         emptyLabel.text = L.lang("no-pools", fallback: "No pools yet.")
         emptyLabel.font = Typography.body(13)
-        emptyLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        emptyLabel.textColor = UIColor(rgbHex: 0x9A9AA6) // Android colorMutedSecondaryText
 
         poolsStack.axis = .vertical
         poolsStack.spacing = 4
         poolsScroll.install(content: poolsStack)
+        // Cap so the card bottom border stays on screen; overflow
+        // scrolls vertically inside the box.
         poolsScroll.capToScreen(reserveBelow: 70)
-
-        let createLink = DexScreenChrome.makeLink(L.lang("create-pair", fallback: "Create Pair"),
-                                                  underline: true, target: self, action: #selector(showCreatePanel))
-        let linkRow = UIStackView(arrangedSubviews: [UIView(), createLink, UIView()])
-        linkRow.axis = .horizontal
-        linkRow.distribution = .equalCentering
 
         listPanel.axis = .vertical
         listPanel.spacing = 10
-        [header, emptyLabel, poolsScroll, linkRow].forEach { listPanel.addArrangedSubview($0) }
+        [header, emptyLabel, poolsScroll].forEach { listPanel.addArrangedSubview($0) }
 
         // ---- Form panel -------------------------------------------------
         let createTitle = UILabel()
@@ -94,12 +99,15 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
         tokenBPicker.onChanged = { [weak self] in self?.scheduleGasEstimate() }
         createButton.setTitle(L.lang("create-pair", fallback: "Create Pair"), for: .normal)
         createButton.addTarget(self, action: #selector(startCreate), for: .touchUpInside)
+        // Same footprint as the Send screen's primary button.
+        createButton.heightAnchor.constraint(equalToConstant: 43).isActive = true
+        createButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
         let createRow = UIStackView(arrangedSubviews: [UIView(), createButton, UIView()])
         createRow.axis = .horizontal
         createRow.distribution = .equalCentering
 
         statusLabel.font = Typography.body(12)
-        statusLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        statusLabel.textColor = UIColor(rgbHex: 0xFBBF24) // Android quantumAmber
         statusLabel.numberOfLines = 0
         statusLabel.isHidden = true
 
@@ -111,26 +119,22 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
          DexScreenChrome.makeLabel(L.lang("token-b", fallback: "Token B")), tokenBPicker,
          statusLabel, createRow].forEach { formPanel.addArrangedSubview($0) }
 
-        let content = UIStackView(arrangedSubviews: [backBar, title, DexScreenChrome.makeDivider(), listPanel, formPanel])
+        let content = UIStackView(arrangedSubviews: [title, DexScreenChrome.makeDivider(), listPanel, formPanel])
         content.axis = .vertical
         content.spacing = 10
-        content.setCustomSpacing(8, after: backBar)
 
         let scroll = UIScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        content.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scroll)
-        scroll.addSubview(content)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 8),
-            content.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16),
-            content.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
-            content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24)
+            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+        // Android parity: back arrow above the 22pt gradient card,
+        // both scrolling together (center_container screen shell).
+        ScreenCard.install(in: scroll, backBar: backBar, content: content)
 
         Task { [weak self] in
             guard let self else { return }
