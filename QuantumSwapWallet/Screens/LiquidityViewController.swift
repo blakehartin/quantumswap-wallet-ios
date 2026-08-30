@@ -197,7 +197,7 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
                 let positions = Self.dictArray(data["positions"])
                 await MainActor.run {
                     self.setBusy(false)
-                    self.renderPositions(positions)
+                    self.renderPositions(positions, meta: data)
                 }
             } catch {
                 await MainActor.run { self.failFlow("\(error)") }
@@ -205,7 +205,77 @@ public final class LiquidityViewController: UIViewController, HomeScreenViewType
         }
     }
 
-    private func renderPositions(_ positions: [[String: Any]]) {
+    private func renderPositions(_ positions: [[String: Any]], meta: [String: Any]) {
+        let L = Localization.shared
+        let api = (meta["source"] as? String) == "api"
+        renderPositionRows(positions)
+        noPositionsLabel.text = api
+            ? L.lang("positions-empty-api",
+                     fallback: "No liquidity positions found for this account on the active release.")
+            : L.lang("no-positions", fallback: "You have no liquidity positions.")
+        guard api else { return }
+        positionsScroll.isHidden = false
+        let indexed = (meta["indexedBlock"] as? NSNumber)?.intValue ?? 0
+        positionsStack.insertArrangedSubview(noteLabel(L.lang("pools-indexed-at", fallback: "Indexed at block [BLOCK]")
+            .replacingOccurrences(of: "[BLOCK]", with: String(indexed))), at: 0)
+        if (meta["capped"] as? Bool) == true {
+            positionsStack.insertArrangedSubview(noteLabel(L.lang("positions-capped",
+                fallback: "Showing the first 1000 positions tracked for this account.")), at: 1)
+        }
+        loadPairsCreated()
+    }
+
+    /// Web app positions.ts "Pools you created (N)" card (API only).
+    private func loadPairsCreated() {
+        let owner = walletAddress
+        Task { [weak self] in
+            guard let self else { return }
+            var payload = DexPayloads.base()
+            payload["ownerAddress"] = owner
+            payload["page"] = 1
+            guard let json = try? await JsBridge.shared.dexCallAsync(method: "liquidityListPairsCreated", payload: payload),
+                  let data = try? DexBridgeResult.unwrapData(json) else { return }
+            let pools = Self.dictArray(data["pools"])
+            guard !pools.isEmpty else { return }
+            let total = (data["totalItems"] as? NSNumber)?.intValue ?? pools.count
+            await MainActor.run {
+                let L = Localization.shared
+                let title = UILabel()
+                title.text = L.lang("positions-pools-created", fallback: "Pools you created") + " (\(total))"
+                title.font = Typography.boldTitle(14)
+                title.textColor = UIColor(named: "colorCommon6") ?? .label
+                self.positionsStack.addArrangedSubview(title)
+                for pool in pools {
+                    let sym0 = DexBridgeResult.sanitizeSymbol(pool["symbol0"] as? String)
+                    let sym1 = DexBridgeResult.sanitizeSymbol(pool["symbol1"] as? String)
+                    let token0 = (pool["token0"] as? String) ?? ""
+                    let token1 = (pool["token1"] as? String) ?? ""
+                    let pair = ExplorerLinks.makePairLabel(
+                        symA: sym0.isEmpty ? DexBridgeResult.shortAddr(token0) : sym0, tokenA: token0,
+                        symB: sym1.isEmpty ? DexBridgeResult.shortAddr(token1) : sym1, tokenB: token1)
+                    let addr = UILabel()
+                    addr.text = DexBridgeResult.shortAddr(pool["pairAddress"] as? String)
+                    addr.font = Typography.body(12)
+                    addr.textColor = UIColor(named: "colorCommon3") ?? .secondaryLabel
+                    let row = UIStackView(arrangedSubviews: [pair, addr])
+                    row.axis = .vertical
+                    row.spacing = 2
+                    self.positionsStack.addArrangedSubview(row)
+                }
+            }
+        }
+    }
+
+    private func noteLabel(_ text: String) -> UILabel {
+        let l = UILabel()
+        l.text = text
+        l.font = Typography.body(12)
+        l.textColor = UIColor(named: "colorCommon3") ?? .secondaryLabel
+        l.numberOfLines = 0
+        return l
+    }
+
+    private func renderPositionRows(_ positions: [[String: Any]]) {
         positionsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         noPositionsLabel.isHidden = !positions.isEmpty
         positionsScroll.isHidden = positions.isEmpty

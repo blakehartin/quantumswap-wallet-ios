@@ -180,12 +180,27 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
 
     // MARK: - Pool list
 
+    // Web app poolExplorer: server pages of 20 with a sort toggle and a
+    // "Load all pairs" action when the Swap Read API serves the release.
+    private var poolsPage = 1
+    private var poolsSort = "liquidity"
+    private var poolsAll = false
+
     @objc private func loadPools() {
+        loadPoolsPage(page: poolsPage, all: poolsAll)
+    }
+
+    private func loadPoolsPage(page: Int, all: Bool) {
         setBusy(true)
+        let sort = poolsSort
         Task { [weak self] in
             guard let self else { return }
             do {
-                let json = try await JsBridge.shared.dexCallAsync(method: "liquidityListPools", payload: DexPayloads.base())
+                var payload = DexPayloads.base()
+                payload["page"] = page
+                payload["sort"] = sort
+                if all { payload["all"] = true }
+                let json = try await JsBridge.shared.dexCallAsync(method: "liquidityListPools", payload: payload)
                 let data = try DexBridgeResult.unwrapData(json)
                 let pools: [[String: Any]] = {
                     if let arr = data["pools"] as? [[String: Any]] { return arr }
@@ -194,7 +209,7 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
                 }()
                 await MainActor.run {
                     self.setBusy(false)
-                    self.renderPools(pools)
+                    self.renderPools(pools, meta: data)
                 }
             } catch {
                 await MainActor.run { self.failFlow("\(error)") }
@@ -202,7 +217,103 @@ public final class PoolsViewController: UIViewController, HomeScreenViewTypeProv
         }
     }
 
-    private func renderPools(_ pools: [[String: Any]]) {
+    private func renderPools(_ pools: [[String: Any]], meta: [String: Any]) {
+        let L = Localization.shared
+        let api = (meta["source"] as? String) == "api"
+        func num(_ key: String, _ fallback: Int) -> Int {
+            (meta[key] as? NSNumber)?.intValue ?? fallback
+        }
+        poolsPage = max(1, num("page", 1))
+        let pageCount = num("pageCount", 1)
+        let total = num("totalItems", pools.count)
+        renderPoolRows(pools)
+        emptyLabel.text = api
+            ? L.lang("pools-empty-api", fallback: "No pools found yet. Try loading all pairs, or create one.")
+            : L.lang("no-pools", fallback: "No pools yet.")
+        guard api else { return }
+        poolsStack.insertArrangedSubview(buildPoolsToolbar(indexedBlock: num("indexedBlock", 0)), at: 0)
+        poolsScroll.isHidden = false
+        if !poolsAll, pageCount > 1 {
+            poolsStack.addArrangedSubview(buildPager(page: poolsPage, pageCount: pageCount, total: total))
+        }
+    }
+
+    /// "Indexed at block N" + sort toggle + "Load all pairs".
+    private func buildPoolsToolbar(indexedBlock: Int) -> UIView {
+        let L = Localization.shared
+        let indexed = UILabel()
+        indexed.text = L.lang("pools-indexed-at", fallback: "Indexed at block [BLOCK]")
+            .replacingOccurrences(of: "[BLOCK]", with: String(indexedBlock))
+        indexed.font = Typography.body(12)
+        indexed.textColor = UIColor(named: "colorCommon3") ?? .secondaryLabel
+
+        let sortToggle = linkButton(poolsSort == "liquidity"
+            ? L.lang("pools-sort-liquidity", fallback: "Sort: liquidity")
+            : L.lang("pools-sort-newest", fallback: "Sort: newest"))
+        sortToggle.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.poolsSort = self.poolsSort == "liquidity" ? "newest" : "liquidity"
+            self.poolsAll = false
+            self.loadPoolsPage(page: 1, all: false)
+        }, for: .touchUpInside)
+        let actions = UIStackView(arrangedSubviews: [sortToggle])
+        if !poolsAll {
+            let loadAll = linkButton(L.lang("pools-load-all", fallback: "Load all pairs"))
+            loadAll.addAction(UIAction { [weak self] _ in
+                guard let self else { return }
+                self.poolsAll = true
+                self.loadPoolsPage(page: 1, all: true)
+            }, for: .touchUpInside)
+            actions.addArrangedSubview(loadAll)
+        }
+        actions.addArrangedSubview(UIView())
+        actions.axis = .horizontal
+        actions.spacing = 16
+        let bar = UIStackView(arrangedSubviews: [indexed, actions])
+        bar.axis = .vertical
+        bar.spacing = 4
+        return bar
+    }
+
+    private func buildPager(page: Int, pageCount: Int, total: Int) -> UIView {
+        let L = Localization.shared
+        let prev = linkButton("\u{2039} " + L.lang("previous", fallback: "Previous"))
+        prev.isEnabled = page > 1
+        prev.alpha = page > 1 ? 1 : 0.4
+        prev.addAction(UIAction { [weak self] _ in
+            guard let self, self.poolsPage > 1 else { return }
+            self.loadPoolsPage(page: self.poolsPage - 1, all: false)
+        }, for: .touchUpInside)
+        let label = UILabel()
+        label.text = L.lang("pools-page-of", fallback: "Page [PAGE] of [COUNT] · [TOTAL] pools")
+            .replacingOccurrences(of: "[PAGE]", with: String(page))
+            .replacingOccurrences(of: "[COUNT]", with: String(pageCount))
+            .replacingOccurrences(of: "[TOTAL]", with: String(total))
+        label.font = Typography.body(12)
+        label.textColor = UIColor(named: "colorCommon3") ?? .secondaryLabel
+        let next = linkButton(L.lang("next", fallback: "Next") + " \u{203a}")
+        next.isEnabled = page < pageCount
+        next.alpha = page < pageCount ? 1 : 0.4
+        next.addAction(UIAction { [weak self] _ in
+            guard let self, self.poolsPage < pageCount else { return }
+            self.loadPoolsPage(page: self.poolsPage + 1, all: false)
+        }, for: .touchUpInside)
+        let row = UIStackView(arrangedSubviews: [prev, label, next, UIView()])
+        row.axis = .horizontal
+        row.spacing = 12
+        row.alignment = .center
+        return row
+    }
+
+    private func linkButton(_ title: String) -> UIButton {
+        let b = UIButton(type: .system)
+        b.setAttributedTitle(NSAttributedString(string: title, attributes: [
+            .font: Typography.body(13), .foregroundColor: UIColor.quantumTeal,
+            .underlineStyle: NSUnderlineStyle.single.rawValue]), for: .normal)
+        return b
+    }
+
+    private func renderPoolRows(_ pools: [[String: Any]]) {
         poolsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         emptyLabel.isHidden = !pools.isEmpty
         poolsScroll.isHidden = pools.isEmpty

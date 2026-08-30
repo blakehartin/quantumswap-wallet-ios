@@ -131,23 +131,27 @@ public final class TokenCreateViewController: UIViewController, HomeScreenViewTy
     }
 
     /// Returns the validated form or the first error message.
-    private func validate() -> Result<Form, String> {
+    /// Validation failure carrying the localized message. `Result`
+    /// requires an `Error` failure type; a bare `String` does not compile.
+    private struct ValidationError: Error { let message: String }
+
+    private func validate() -> Result<Form, ValidationError> {
         let L = Localization.shared
         let name = text(nameField)
         let symbol = text(symbolField)
         let supply = text(supplyField)
         if name.isEmpty || name.count > 48 || Self.containsUnsafeText(name) {
-            return .failure(L.lang("token-name-invalid", fallback: "Enter a token name (up to 48 plain-text characters)."))
+            return .failure(ValidationError(message: L.lang("token-name-invalid", fallback: "Enter a token name (up to 48 plain-text characters).")))
         }
         if symbol.range(of: #"^[A-Za-z0-9]{1,16}$"#, options: .regularExpression) == nil {
-            return .failure(L.lang("token-symbol-invalid", fallback: "Symbol must be 1-16 letters or digits."))
+            return .failure(ValidationError(message: L.lang("token-symbol-invalid", fallback: "Symbol must be 1-16 letters or digits.")))
         }
         if StablecoinImpersonatorFilter.impersonatesStablecoin(symbol: symbol, name: name) {
-            return .failure(L.lang("token-impersonator",
-                fallback: "This name or symbol is not allowed because it impersonates a stablecoin or fiat currency."))
+            return .failure(ValidationError(message: L.lang("token-impersonator",
+                fallback: "This name or symbol is not allowed because it impersonates a stablecoin or fiat currency.")))
         }
         if !Self.isValidSupply(supply, decimals: decimals) {
-            return .failure(L.lang("token-supply-invalid", fallback: "Enter a valid total supply."))
+            return .failure(ValidationError(message: L.lang("token-supply-invalid", fallback: "Enter a valid total supply.")))
         }
         return .success(Form(name: name, symbol: symbol, decimals: decimals, supply: supply))
     }
@@ -197,8 +201,8 @@ public final class TokenCreateViewController: UIViewController, HomeScreenViewTy
 
     @objc private func tapCreate() {
         switch validate() {
-        case .failure(let message):
-            setError(message)
+        case .failure(let error):
+            setError(error.message)
         case .success(let form):
             setError(nil)
             showDeploySteps(form)

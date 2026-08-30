@@ -470,7 +470,7 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
             RestoreFlow.shared.onComplete = { [weak self] in
                 guard let self = self,
                 RestoreFlow.shared.didImportAny else { return }
-                self.finishAndRouteHome()
+                self.presentPostRestoreUnlockGateThenRouteHome()
             }
             RestoreFlow.shared.restoreFromFile(from: self,
                 strongboxPassword: pw)
@@ -505,7 +505,7 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
             RestoreFlow.shared.onComplete = { [weak self] in
                 guard let self = self,
                 RestoreFlow.shared.didImportAny else { return }
-                self.finishAndRouteHome()
+                self.presentPostRestoreUnlockGateThenRouteHome()
             }
             RestoreFlow.shared.runBatch(urls: files(), host: self,
                 strongboxPassword: strongboxPassword)
@@ -1546,6 +1546,65 @@ public final class HomeWalletViewController: UIViewController, HomeScreenViewTyp
         }
     }
 
+    /// Post-restore unlock gate for the restore-from-file / restore-from-
+    /// folder paths. Mirror of Android `completeRestoreNavigation` ->
+    /// `requirePasswordReentryThenNavigate`: after a FIRST-TIME restore
+    /// (this session created the strongbox from `chosenPassword`), make the
+    /// user retype the app password before routing home so a mismatch
+    /// between what they think they chose and what the strongbox holds
+    /// surfaces NOW -- not on the next cold launch, when the wallet would
+    /// simply refuse to open. Same gate the create / restore-from-seed
+    /// paths already apply in `tapBackupDone`.
+    ///
+    /// Validation is `verifyOnlyIfPresent`, NEVER `bootstrapOrUnlock`: the
+    /// strongbox definitively exists here, and a gate backed by the
+    /// create-capable variant would let a typo silently define a new
+    /// password on any state regression.
+    ///
+    /// Post-onboarding restores (`chosenPassword` empty) route straight
+    /// home: `resolveStrongboxWritePassword` already verified the app
+    /// password for this session, and gating again would double-prompt.
+    /// Pinned by `FirstTimeRestoreUnlockGateTests`.
+    private func presentPostRestoreUnlockGateThenRouteHome() {
+        if chosenPassword.isEmpty {
+            finishAndRouteHome()
+            return
+        }
+        let dlg = UnlockDialogViewController()
+        dlg.onUnlock = { [weak self, weak dlg] pw in
+            guard let self = self, let dlg = dlg else { return }
+            if pw.isEmpty {
+                self.showEmptyPasswordError(over: dlg)
+                return
+            }
+            let wait = WaitDialogViewController(
+                message: Localization.shared.getWaitUnlockByLangValues())
+            dlg.present(wait, animated: true)
+            Task.detached(priority: .userInitiated) { [weak self, weak dlg, weak wait] in
+                var failure: Error? = nil
+                do {
+                    try Self.verifyOnlyIfPresent(password: pw)
+                } catch {
+                    failure = error
+                }
+                let err = failure
+                await MainActor.run {
+                    wait?.dismiss(animated: true) {
+                        if err == nil {
+                            self?.chosenPassword = ""
+                            dlg?.dismiss(animated: true) {
+                                self?.finishAndRouteHome()
+                            }
+                        } else if let dlg = dlg {
+                            self?.showUnlockError(over: dlg, error: err)
+                        }
+                    }
+                }
+            }
+        }
+        present(dlg, animated: true)
+    }
+
     private func finishAndRouteHome() {
         (parent as? HomeViewController)?.showMain()
     }
@@ -2218,18 +2277,10 @@ public final class SeedChipGrid: UIView {
     }
 
     /// Caption label `A1`..`L4` rendered above the word cell row.
-    /// Centered, 11pt, tinted `colorCommonSeed{Letter}` (block colour),
-    /// matching Android `textView_home_seed_words_view_caption_*`.
-    /// Row H is a dark-mode special case: `colorCommonSeedH` is pure
-    /// `#000000` in BOTH light and dark variants of the asset (Android
-    /// parity), so painting the H1..H4 captions with that asset would
-    /// render invisible black text against the near-black backdrop in
-    /// dark mode. Swap the H row to `colorCommon6` (black light /
-    /// white dark) so the captions stay legible in either appearance;
-    /// every other row keeps its vivid block colour because that
-    /// already contrasts against both light and dark backgrounds.
-    /// `UILabel.textColor` is trait-aware, so the swap reacts
-    /// automatically when the user toggles dark mode at runtime.
+    /// Centered, 11pt, hard-coded white in both light and dark mode
+    /// (matching the white seed-word foreground on the coloured
+    /// chips), replacing the earlier per-row `colorCommonSeed{Letter}`
+    /// tint.
     private func captionLabel(for index: Int) -> UILabel {
         let letter = Self.letter(for: index)
         let column = (index % 4) + 1
@@ -2237,11 +2288,7 @@ public final class SeedChipGrid: UIView {
         l.text = "\(letter)\(column)"
         l.font = Typography.body(11)
         l.textAlignment = .center
-        let captionColor: UIColor =
-            (letter == "H"
-             ? (UIColor(named: "colorCommon6") ?? .label)
-             : (UIColor(named: "colorCommonSeed\(letter)") ?? .label))
-        l.textColor = captionColor
+        l.textColor = .white
         return l
     }
 

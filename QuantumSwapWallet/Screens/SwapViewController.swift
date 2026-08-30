@@ -36,6 +36,26 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
     private let spinner = UIActivityIndicatorView(style: .medium)
 
     private var lastQuotedAmountOut: String?
+    /// Which side the user typed last (web-app lastEdited): From ->
+    /// exact-in, To -> exact-out. Wrap / unwrap and fee-on-transfer
+    /// pairs are always exact-in, see `isExactOut()`.
+    private var lastEditedFromSide = true
+    /// Exact-out quote: the required input and the most that may be
+    /// spent (quote plus slippage), as returned by swapGetAmountsIn.
+    private var lastQuotedAmountIn: String?
+    private var lastQuotedAmountInMax: String?
+    /// Set when the estimate reported an exact-in fallback: the steps
+    /// dialog closes and the close handler re-quotes exact-in from the
+    /// quoted input instead of clearing the amounts.
+    private var restartAsExactIn = false
+    private let exactOutHintLabel = UILabel()
+    /// The path the last quote priced (web-app routePath): sent with the
+    /// swap payload so estimate and submit build the same route.
+    private var lastQuotedPath: [String]?
+    /// "router" (re-quoted on-chain) or "api-estimate" (indexed reserves).
+    private var lastQuoteSource = ""
+    private var lastQuoteIndexedBlock: Int64 = 0
+    private let quoteSourceLabel = UILabel()
     private var flowInFlight = false
     private var syncingAmounts = false
     private var quoteTask: Task<Void, Never>?
@@ -75,6 +95,13 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
 
         buildBox(fromBox, balanceButton: fromBalanceButton, field: amountInField, fromSide: true)
         buildBox(toBox, balanceButton: toBalanceButton, field: amountOutField, fromSide: false)
+        exactOutHintLabel.text = L.lang("swap-exact-output-unavailable-fee-token",
+            fallback: "Exact output is not available for tokens that burn or tax on transfer. Enter the quantity to swap in the From field.")
+        exactOutHintLabel.font = Typography.body(12)
+        exactOutHintLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        exactOutHintLabel.numberOfLines = 0
+        exactOutHintLabel.isHidden = true
+        toBox.addArrangedSubview(exactOutHintLabel)
 
         // Flip button (desktop swap-flip): 40pt oval.
         let flip = UIButton(type: .custom)
@@ -95,11 +122,18 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
         flipRow.distribution = .equalCentering
 
         slippageField.text = "1"
+        // Slippage feeds the exact-out maximum, so re-quote the last side.
+        slippageField.addAction(UIAction { [weak self] _ in self?.slippageEdited() }, for: .editingChanged)
 
         routeLabel.font = Typography.body(12)
         routeLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
         routeLabel.numberOfLines = 0
         routeLabel.isHidden = true
+
+        quoteSourceLabel.font = Typography.body(12)
+        quoteSourceLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
+        quoteSourceLabel.numberOfLines = 0
+        quoteSourceLabel.isHidden = true
 
         statusLabel.font = Typography.body(12)
         statusLabel.textColor = UIColor(named: "colorCommon10") ?? .secondaryLabel
@@ -116,6 +150,22 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
         buttonRow.spacing = 12
         buttonRow.alignment = .center
 
+        // Slippage row: the field is capped to ~4 characters' width
+        // (56pt covers 4 digits at body(15) plus the roundedRect
+        // insets) with a trailing "%" unit label; the spacer absorbs
+        // the remaining row width so the field stays left-aligned.
+        slippageField.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        let percentLabel = UILabel()
+        percentLabel.text = "%"
+        percentLabel.font = Typography.body(15)
+        percentLabel.textColor = UIColor(named: "colorCommon6") ?? .label
+        let slippageSpacer = UIView()
+        slippageSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let slippageRow = UIStackView(arrangedSubviews: [slippageField, percentLabel, slippageSpacer])
+        slippageRow.axis = .horizontal
+        slippageRow.spacing = 6
+        slippageRow.alignment = .center
+
         let content = UIStackView(arrangedSubviews: [
             backBar, title, DexScreenChrome.makeDivider(), releaseBanner,
             DexScreenChrome.makeLabel(L.lang("swap-from-token", fallback: "From token")),
@@ -126,8 +176,9 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
             toPicker,
             toBox,
             routeLabel,
+            quoteSourceLabel,
             DexScreenChrome.makeLabel(L.lang("slippage", fallback: "Slippage")),
-            slippageField,
+            slippageRow,
             buttonRow,
             statusLabel
         ])
@@ -216,6 +267,12 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
     private func onTokensChanged() {
         quoteTask?.cancel()
         lastQuotedAmountOut = nil
+        lastQuotedAmountIn = nil
+        lastQuotedAmountInMax = nil
+        lastEditedFromSide = true
+        lastQuotedPath = nil
+        lastQuoteSource = ""
+        updateQuoteSourceNote()
         setAmountSilently(amountInField, "")
         setAmountSilently(amountOutField, "")
         routeLabel.isHidden = true
@@ -224,7 +281,16 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
         fromBox.isHidden = !ready
         toBox.isHidden = !ready
         flipRow.isHidden = !ready
+        // A fee-on-transfer side has no exact-output form: the To field
+        // only shows the estimate and the hint says why.
+        let locked = exactOutLocked()
+        amountOutField.isUserInteractionEnabled = !locked
+        amountOutField.alpha = locked ? 0.6 : 1
+        exactOutHintLabel.isHidden = !(locked && ready)
+        let mode = wrapMode()
+        nextButton.setTitle(modeLabel(mode), for: .normal)
         guard ready, fromPicker.tokenValue().caseInsensitiveCompare(toPicker.tokenValue()) != .orderedSame else { return }
+        if mode != nil { return }      // 1:1 wrap / unwrap: no route search
         setBusy(true)
         Task { [weak self] in
             guard let self else { return }
@@ -244,6 +310,7 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
     }
 
     private func fillFromBalance(fromSide: Bool) {
+        if !fromSide, exactOutLocked() { return }
         let picker = fromSide ? fromPicker! : toPicker!
         let field = fromSide ? amountInField : amountOutField
         let v = picker.balanceText()
@@ -291,11 +358,19 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
     private func runQuote(fromChanged: Bool) async {
         guard !fromPicker.isEmpty, !toPicker.isEmpty,
               fromPicker.tokenValue().caseInsensitiveCompare(toPicker.tokenValue()) != .orderedSame else { return }
+        lastEditedFromSide = fromChanged || wrapMode() != nil
         let source = text(fromChanged ? amountInField : amountOutField)
         let target = fromChanged ? amountOutField : amountInField
         guard Self.isPositiveAmount(source) else {
             setAmountSilently(target, "")
             lastQuotedAmountOut = nil
+            lastQuotedAmountIn = nil
+            lastQuotedAmountInMax = nil
+            return
+        }
+        if wrapMode() != nil {           // web-app swap.ts: wrap / unwrap quotes 1:1
+            setAmountSilently(target, source)
+            lastQuotedAmountOut = source
             return
         }
         setBusy(true)
@@ -314,19 +389,45 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
                 let out = (data["amountOut"] as? String) ?? ""
                 guard !Task.isCancelled else { return }
                 lastQuotedAmountOut = out
+                lastQuotedAmountIn = nil
+                lastQuotedAmountInMax = nil
+                rememberQuoteMeta(data)
                 setAmountSilently(amountOutField, out)
             } else {
                 payload["amountOut"] = source
+                payload["slippagePercent"] = slippagePercent()
                 let json = try await JsBridge.shared.dexCallAsync(method: "swapGetAmountsIn", payload: payload)
                 let data = try DexBridgeResult.unwrapData(json)
                 let input = (data["amountIn"] as? String) ?? ""
                 guard !Task.isCancelled else { return }
                 lastQuotedAmountOut = source
+                lastQuotedAmountIn = input
+                lastQuotedAmountInMax = (data["amountInMax"] as? String) ?? input
+                rememberQuoteMeta(data)
                 setAmountSilently(amountInField, input)
             }
             setBusy(false)
         } catch {
             failFlow("\(error)")
+        }
+    }
+
+    private func rememberQuoteMeta(_ data: [String: Any]) {
+        lastQuotedPath = (data["path"] as? [Any])?.compactMap { $0 as? String }
+        lastQuoteSource = (data["source"] as? String) ?? ""
+        lastQuoteIndexedBlock = (data["indexedBlock"] as? NSNumber)?.int64Value ?? 0
+        updateQuoteSourceNote()
+    }
+
+    /// Web app appendQuoteSource: say so when the number came from the
+    /// indexed reserves rather than the router.
+    private func updateQuoteSourceNote() {
+        let show = lastQuoteSource == "api-estimate"
+        quoteSourceLabel.isHidden = !show
+        if show {
+            quoteSourceLabel.text = Localization.shared.lang("swap-quote-source-indexed",
+                fallback: "Estimated from indexed reserves · block [BLOCK]")
+                .replacingOccurrences(of: "[BLOCK]", with: String(lastQuoteIndexedBlock))
         }
     }
 
@@ -382,10 +483,22 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
             do {
                 try await DexScreenChrome.resolveMeta(self.fromPicker, walletAddress: self.walletAddress)
                 try await DexScreenChrome.resolveMeta(self.toPicker, walletAddress: self.walletAddress)
+                // Wrap / unwrap talk to the WQ contract directly, and a native
+                // from-side travels as tx value through the payable router
+                // entry point: neither needs an allowance, so no approve step.
+                if self.wrapMode() != nil || self.fromPicker.isNative {
+                    await MainActor.run {
+                        self.setBusy(false)
+                        self.showStepsDialog(needsApproval: false)
+                    }
+                    return
+                }
                 var payload = DexPayloads.base()
                 payload["fromTokenValue"] = self.fromPicker.tokenValue()
                 payload["fromDecimals"] = self.fromPicker.decimals()
-                payload["requiredAmount"] = amountIn
+                // Exact-out lets the router pull up to amountInMax, so that is
+                // the allowance to check (and to approve).
+                payload["requiredAmount"] = self.isExactOut() ? self.maxInput() : amountIn
                 payload["ownerAddress"] = self.walletAddress
                 let json = try await JsBridge.shared.dexCallAsync(method: "swapCheckAllowance", payload: payload)
                 let data = try DexBridgeResult.unwrapData(json)
@@ -408,10 +521,16 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
         let toSym = DexBridgeResult.sanitizeSymbol(toPicker.symbol())
         let amountIn = text(amountInField)
         let amountOut = lastQuotedAmountOut ?? ""
+        let exactOut = isExactOut()
+        // Exact-out spends at most amountInMax for exactly amountOut: the
+        // review, the approval and the native value all use the maximum.
+        let amountInMax = exactOut ? maxInput() : amountIn
+        let upTo = exactOut ? L.lang("swap-up-to", fallback: "up to") + " " : ""
         let release = ReleaseStore.readActive()
         let fromContract = DexScreenChrome.resolveTokenContract(fromPicker.tokenValue(), release: release)
         let toContract = DexScreenChrome.resolveTokenContract(toPicker.tokenValue(), release: release)
         let fromNative = fromPicker.isNative
+        let mode = wrapMode()
         let forWord = L.lang("swap-for", fallback: "for")
 
         var routeSuffix = ""
@@ -420,32 +539,46 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
             routeSuffix = " (" + route[r.upperBound...].replacingOccurrences(of: " > ", with: " -> ") + ")"
         }
         let base = ReviewSpec()
-            .action(L.lang("swap", fallback: "Swap") + " " + fromSym + " " + forWord + " " + toSym + routeSuffix)
+            .action((mode == nil ? L.lang("swap", fallback: "Swap") : modeLabel(mode))
+                    + " " + fromSym + " " + forWord + " " + toSym + routeSuffix)
             .fromTokenContract(fromContract)
             .toTokenContract(toContract)
             .fromAddress(walletAddress)
-            .toAddress(release.router)
-            .quantityValue(fromNative ? amountIn : "0")
-            .tokenQuantityValue(amountIn + " " + fromSym + " " + forWord + " " + amountOut + " " + toSym)
+            .toAddress(mode == nil ? release.router : release.wq)
+            .quantityValue(fromNative ? amountInMax : "0")
+            .tokenQuantityValue(upTo + amountInMax + " " + fromSym + " " + forWord + " " + amountOut + " " + toSym)
             .networkText(ReviewSpec.networkText())
 
         let fromValue = fromPicker.tokenValue()
         let fromDecimals = fromPicker.decimals()
         let swapArgs: () -> [String: Any] = { [weak self] in
             guard let self else { return [:] }
-            return [
+            var args: [String: Any] = [
                 "fromTokenValue": self.fromPicker.tokenValue(),
                 "toTokenValue": self.toPicker.tokenValue(),
                 "fromDecimals": self.fromPicker.decimals(),
                 "toDecimals": self.toPicker.decimals(),
                 "amountIn": amountIn,
-                "lastChanged": "from",
+                "amountOut": self.text(self.amountOutField),
+                "lastChanged": self.isExactOut() ? "to" : "from",
                 "slippagePercent": self.slippagePercent(),
                 "recipientAddress": self.walletAddress
             ]
+            if let path = self.lastQuotedPath, path.count >= 2 { args["path"] = path }
+            return args
         }
 
         var steps: [TxStep] = []
+        if let mode {
+            // Single WQ.deposit / WQ.withdraw step; no approval, no router.
+            let isWrap = mode == "wrap"
+            let wrapPayload: () -> [String: Any] = { ["amount": amountIn] }
+            steps.append(TxStep(label: L.lang("step-" + mode, fallback: isWrap ? "Wrap" : "Unwrap")
+                                    + " " + amountIn + " " + fromSym,
+                                kind: isWrap ? .wrap : .unwrap, estimatePayload: wrapPayload,
+                                submitMethod: isWrap ? "swapSubmitWrap" : "swapSubmitUnwrap",
+                                submitPayload: wrapPayload))
+        } else {
         if needsApproval {
             let approveReview = ReviewSpec()
                 .action(L.lang("approve", fallback: "Approve") + " " + fromSym)
@@ -454,33 +587,86 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
                 .toAddress(fromContract)
                 .quantityValue("0")
                 .tokenQuantityLabelKey("approval-token-quantity")
-                .tokenQuantityValue(amountIn + " " + fromSym)
+                .tokenQuantityValue(amountInMax + " " + fromSym)
             let approvePayload: () -> [String: Any] = {
-                ["fromTokenValue": fromValue, "fromDecimals": fromDecimals, "amount": amountIn]
+                ["fromTokenValue": fromValue, "fromDecimals": fromDecimals, "amount": amountInMax]
             }
             steps.append(TxStep(label: L.lang("approve", fallback: "Approve") + " " + fromSym,
                                 kind: .approve, estimatePayload: approvePayload,
                                 submitMethod: "swapSubmitApproval", submitPayload: approvePayload,
                                 reviewOverride: approveReview))
         }
+        // Exact-out only: the bridge reports an exact-in fallback (listed
+        // fee-on-transfer token on the path, or the pre-flight reverted)
+        // in the estimate echo; close and restart exact-in.
+        let onSwapEstimated: (([String: Any]) -> Void)? = exactOut
+            ? { [weak self] extra in self?.onSwapEstimated(extra) } : nil
         steps.append(TxStep(label: L.lang("swap", fallback: "Swap") + " " + fromSym + " -> " + toSym,
                             kind: .swap, estimatePayload: swapArgs,
-                            submitMethod: "swapSubmitSwap", submitPayload: swapArgs))
+                            submitMethod: "swapSubmitSwap", submitPayload: swapArgs,
+                            onEstimated: onSwapEstimated))
+        }
 
         flowInFlight = true
-        let dlg = TxStepsDialogViewController(title: L.lang("swap", fallback: "Swap"),
+        let dlg = TxStepsDialogViewController(title: mode == nil ? L.lang("swap", fallback: "Swap") : modeLabel(mode),
                                               walletAddress: walletAddress, steps: steps, baseReview: base)
         dlg.onClose = { [weak self] in
             guard let self else { return }
             self.stepsDialog = nil
             self.flowInFlight = false
             self.lastQuotedAmountOut = nil
+            self.lastQuotedAmountIn = nil
+            self.lastQuotedAmountInMax = nil
+            if self.restartAsExactIn {
+                // The estimate reported an exact-in fallback: the From field
+                // already holds the quoted input, so explain and re-quote
+                // from it; Next then runs exact-in.
+                self.restartAsExactIn = false
+                self.lastEditedFromSide = true
+                DexScreenChrome.presentError(from: self, message: L.lang("swap-exact-output-fallback",
+                    fallback: "Exact output is not available for this token; swapping the exact input instead. Review the quote and tap Next again."))
+                self.scheduleQuote(fromChanged: true)
+                return
+            }
             self.setAmountSilently(self.amountInField, "")
             self.setAmountSilently(self.amountOutField, "")
             self.updateBalances()
         }
         stepsDialog = dlg
         dlg.show(from: self)
+    }
+
+    private func onSwapEstimated(_ extra: [String: Any]) {
+        guard let fallback = extra["fallback"] as? String, !fallback.isEmpty else { return }
+        restartAsExactIn = true
+        stepsDialog?.dismissSteps()
+    }
+
+    /// Either side burns or taxes on transfer: no fee-safe exact-output
+    /// form exists, so the pair stays exact-in and the To field is
+    /// estimate-only.
+    private func exactOutLocked() -> Bool {
+        RecognizedTokens.isFeeOnTransfer(fromPicker.tokenValue())
+            || RecognizedTokens.isFeeOnTransfer(toPicker.tokenValue())
+    }
+
+    /// Web-app isExactOut: the To side was typed last, for a router swap
+    /// (wrap / unwrap is always 1:1) on a pair without a listed
+    /// fee-on-transfer token.
+    private func isExactOut() -> Bool {
+        !lastEditedFromSide && wrapMode() == nil && !exactOutLocked()
+    }
+
+    /// The most an exact-out swap may spend: the quoted maximum, or the
+    /// From field when no exact-out quote has landed yet.
+    private func maxInput() -> String {
+        if let m = lastQuotedAmountInMax, !m.isEmpty { return m }
+        return text(amountInField)
+    }
+
+    private func slippageEdited() {
+        guard !text(amountInField).isEmpty || !text(amountOutField).isEmpty else { return }
+        scheduleQuote(fromChanged: lastEditedFromSide)
     }
 
     // MARK: - Helpers
@@ -502,12 +688,44 @@ public final class SwapViewController: UIViewController, HomeScreenViewTypeProvi
                 "invalidQuantity", fallback: "Enter a valid quantity."))
             return false
         }
+        if isExactOut() {
+            // Exact-out may spend up to amountInMax; refuse before the dialog
+            // when the cached balance is known and clearly smaller.
+            let max = maxInput()
+            let bal = fromPicker.balanceText().replacingOccurrences(of: ",", with: "")
+            if let m = Decimal(string: max), let b = Decimal(string: bal), b > 0, m > b {
+                let symbol = DexBridgeResult.sanitizeSymbol(fromPicker.symbol())
+                DexScreenChrome.presentError(from: self, message: L.err("swapMaxSoldExceedsBalance",
+                    fallback: "Up to [QUANTITY] could be sold, which exceeds your balance.")
+                    .replacingOccurrences(of: "[QUANTITY]", with: max + " " + symbol))
+                return false
+            }
+        }
         return true
     }
 
     private static func isPositiveAmount(_ s: String) -> Bool {
         !s.isEmpty && s.range(of: #"^\d*\.?\d+$"#, options: .regularExpression) != nil
             && (Double(s) ?? 0) > 0
+    }
+
+    /// Web-app swap.ts isWrap / isUnwrap: native Q against the active
+    /// release's WQ contract is a 1:1 wrap / unwrap (one WQ.deposit /
+    /// WQ.withdraw transaction), never a router swap. "wrap", "unwrap" or nil.
+    private func wrapMode() -> String? {
+        let from = fromPicker.tokenValue(), to = toPicker.tokenValue()
+        let wq = ReleaseStore.readActive().wq
+        guard !wq.isEmpty else { return nil }
+        if from == "Q", wq.caseInsensitiveCompare(to) == .orderedSame { return "wrap" }
+        if to == "Q", wq.caseInsensitiveCompare(from) == .orderedSame { return "unwrap" }
+        return nil
+    }
+
+    /// Action-button / dialog label for the current pair: Next, Wrap or Unwrap.
+    private func modeLabel(_ mode: String?) -> String {
+        let L = Localization.shared
+        guard let mode else { return L.lang("next", fallback: "Next") }
+        return L.lang(mode, fallback: mode == "wrap" ? "Wrap" : "Unwrap")
     }
 
     private func slippagePercent() -> Double {
